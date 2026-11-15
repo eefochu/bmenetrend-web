@@ -137,7 +137,7 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
       </div>
       <div className="planner-map">
         <TransitMap
-          styleUrl={mapStyleUrl(preferences.mapStyle, preferences.dark)}
+          styleUrl={mapStyleUrl(preferences.dark)}
           userPosition={location.position}
           route={{ origin: effectiveOrigin?.position ?? null, destination: destination?.position ?? null }}
           routeColor={preferences.scheme.primary}

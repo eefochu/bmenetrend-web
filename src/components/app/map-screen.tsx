@@ -96,7 +96,7 @@ export function MapScreen({ location, active, openSearchRequest, onFullscreenCha
       hidden={!active}
     >
       <TransitMap
-        styleUrl={mapStyleUrl(preferences.mapStyle, preferences.dark)}
+        styleUrl={mapStyleUrl(preferences.dark)}
         bottomPadding={docked || minimized ? 0 : Math.round(peek)}
         leftPadding={docked && !minimized ? DOCKED_PANEL + 16 : 0}
         userPosition={location.position}

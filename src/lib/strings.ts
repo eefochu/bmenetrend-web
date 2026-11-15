@@ -53,10 +53,6 @@ export const t = {
   themeAuto: "Automatikus", // design_theme_auto
   themeLight: "Világos", // design_theme_light
   themeDark: "Sötét", // design_theme_dark
-  mapStyleTitle: "Térképtípus", // map_style_title
-  mapStyleStreet: "Utcatérkép", // map_style_street
-  mapStyleSatellite: "Műhold", // map_style_satellite
-  mapStyleHint: "EOX Sentinel-2 műholdképek (2016), kisebb részletességgel. Internetkapcsolat szükséges.", // map_style_hint
   accentTitle: "Kiemelőszín", // accent_title
   accentHint:
     "A Rendszer színei a háttérképhez igazodnak. Egyéni kiemelőszínnél a felületek is a választott színt követik.", // accent_hint
@@ -80,8 +76,6 @@ export const t = {
   // Web: the street map is OpenFreeMap Liberty recoloured to the app's Google basemap palette.
   mapStyleCredit:
     "Az utcatérkép az OpenFreeMap Liberty (OSM Liberty / OSM Bright, BSD 3-Clause, CC BY 4.0) stílusának a Google-térképhez igazított színezésű változata. Google-szolgáltatást nem használ.",
-  mapSatelliteCredit:
-    "Műholdképek: EOxCloudless, EOX IT Services GmbH. Módosított Copernicus Sentinel-adatok (2016), CC BY 4.0. https://cloudless.eox.at", // map_satellite_credit
   about: "Névjegy", // ota_about_title
   aboutVersion: (version: string) => `Verzió: ${version}`, // ota_about_version
   aboutAppDescription:

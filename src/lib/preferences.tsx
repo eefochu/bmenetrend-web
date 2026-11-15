@@ -17,7 +17,6 @@ import {
   type ThemeMode,
 } from "~/lib/theme";
 
-export type MapStyle = "street" | "satellite";
 export const LOCAL_PROVIDERS = [
   { id: "viabusz", name: "ViaBusz" },
   { id: "homm", name: "HOMM" },
@@ -28,7 +27,6 @@ export type Preferences = {
   themeMode: ThemeMode;
   accent: AccentColor;
   customAccent: number;
-  mapStyle: MapStyle;
   localProviders: string[];
   /** Departure window in minutes (DepartureTime.windows); read by the departures port. */
   windowMinutes: number;
@@ -41,7 +39,6 @@ const DEFAULTS: Preferences = {
   themeMode: "system",
   accent: "system",
   customAccent: DEFAULT_CUSTOM_ACCENT,
-  mapStyle: "street",
   localProviders: LOCAL_PROVIDERS.map((provider) => provider.id),
   windowMinutes: 60,
   nationwide: true,
@@ -65,7 +62,9 @@ function read(): Preferences {
   try {
     const raw = window.localStorage.getItem(PREFERENCES_KEY);
     if (!raw) return DEFAULTS;
-    const stored = JSON.parse(raw) as Partial<Preferences>;
+    const stored = JSON.parse(raw) as Partial<Preferences> & { mapStyle?: unknown };
+    // Discard the retired map type while retaining existing user preferences.
+    delete stored.mapStyle;
     return { ...DEFAULTS, ...stored };
   } catch {
     return DEFAULTS;
