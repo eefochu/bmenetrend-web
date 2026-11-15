@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Slider, Switch } from "~/components/material";
 import { Icon, PageHeader, SectionTitle } from "~/components/ui";
-import { usePreferences, type MapStyle } from "~/lib/preferences";
+import { usePreferences } from "~/lib/preferences";
 import { t } from "~/lib/strings";
 import { accentSwatch, ACCENTS, luminance, type ThemeMode } from "~/lib/theme";
 import { MapCreditsDialog } from "./map-attribution";
@@ -12,11 +12,6 @@ const THEMES: { mode: ThemeMode; label: string }[] = [
   { mode: "light", label: t.themeLight },
   { mode: "dark", label: t.themeDark },
 ];
-const MAP_STYLES: { style: MapStyle; label: string }[] = [
-  { style: "street", label: t.mapStyleStreet },
-  { style: "satellite", label: t.mapStyleSatellite },
-];
-
 /** Port of ui/SettingsPage.kt. Offline packs and OTA updates are Android-only and not part of the web app. */
 export function SettingsPage({ onBack, onAbout }: { onBack: () => void; onAbout: () => void }) {
   const preferences = usePreferences();
@@ -35,18 +30,6 @@ export function SettingsPage({ onBack, onAbout }: { onBack: () => void; onAbout:
                 </ChoiceButton>
               ))}
             </div>
-          </div>
-
-          <SectionTitle>{t.mapStyleTitle}</SectionTitle>
-          <div className="group-surface">
-            <div className="choice-row" role="radiogroup" aria-label={t.mapStyleTitle}>
-              {MAP_STYLES.map(({ style, label }) => (
-                <ChoiceButton key={style} selected={preferences.mapStyle === style} onClick={() => preferences.update({ mapStyle: style })}>
-                  {label}
-                </ChoiceButton>
-              ))}
-            </div>
-            <p className="t-body-small on-variant group-hint">{t.mapStyleHint}</p>
           </div>
 
           <SectionTitle>{t.accentTitle}</SectionTitle>
