@@ -71,6 +71,11 @@ export function MapScreen({
   const root = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [sheet, setSheet] = useState<SheetValue>("partial");
+  const [visibleSheetHeight, setVisibleSheetHeight] = useState<number | null>(null);
+  const sheetCameraTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useEffect(() => () => clearTimeout(sheetCameraTimer.current), []);
   const [searchOpen, setSearchOpen] = useState(false);
   const [place, setPlace] = useState<PlaceResult | null>(null);
   const [placeRequest, setPlaceRequest] = useState(0);
@@ -346,6 +351,12 @@ export function MapScreen({
       "--sheet-visible",
       String(Math.round(visible)),
     );
+    // The CSS follows every drag frame; refit the camera only once the drag settles.
+    clearTimeout(sheetCameraTimer.current);
+    sheetCameraTimer.current = setTimeout(
+      () => setVisibleSheetHeight(Math.round(visible)),
+      150,
+    );
   }, []);
 
   // Location button: ask for location (opt-in), then centre on the user when a fix exists.
@@ -446,7 +457,9 @@ export function MapScreen({
     >
       <TransitMap
         styleUrl={mapStyleUrl(preferences.dark)}
-        bottomPadding={docked || minimized ? 0 : Math.round(peek)}
+        bottomPadding={
+          docked || minimized ? 0 : (visibleSheetHeight ?? Math.round(peek))
+        }
         leftPadding={docked && !minimized ? dockedPanelWidth + 16 : 0}
         userPosition={location.position}
         locateRequest={locateRequest}

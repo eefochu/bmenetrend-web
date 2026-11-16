@@ -20,6 +20,7 @@ import {
   type MapLine,
 } from "./transit-layers";
 import { attachStyleImages } from "./style-images";
+import { routeCamera } from "./route-camera";
 
 setWorkerUrl(`/maplibre/maplibre-gl-worker.mjs?v=${getVersion()}`);
 
@@ -109,6 +110,7 @@ export default function TransitMap({
     "loading",
   );
   const [styleRevision, setStyleRevision] = useState(0);
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const styleReady = useRef(false);
   const lastFit = useRef("");
   const initialStyle = useRef(styleUrl);
@@ -220,7 +222,15 @@ export default function TransitMap({
           ? "pointer"
           : "";
     });
-    const observer = new ResizeObserver(() => map.resize());
+    const observer = new ResizeObserver(() => {
+      map.resize();
+      const { clientWidth: width, clientHeight: height } = map.getContainer();
+      setViewport((current) =>
+        current.width === width && current.height === height
+          ? current
+          : { width, height },
+      );
+    });
     observer.observe(container.current);
     return () => {
       observer.disconnect();
@@ -288,31 +298,29 @@ export default function TransitMap({
   }, [focused]);
 
   useEffect(() => {
-    if (focusPoint)
+    if (focusPoint && !lines.some((line) => line.coordinates.length > 1))
       mapRef.current?.flyTo({
         center: [focusPoint.lon, focusPoint.lat],
         zoom: Math.max(15, mapRef.current.getZoom()),
       });
-  }, [focusPoint]);
+  }, [focusPoint, lines]);
 
   useEffect(() => {
     const points = lines.flatMap((line) => line.coordinates);
-    const key = `${points.length}:${points[0]?.join(":")}:${points.at(-1)?.join(":")}`;
     if (!points.length) {
       lastFit.current = "";
       return;
     }
-    if (key === lastFit.current || !mapRef.current) return;
-    lastFit.current = key;
-    const bounds = new LngLatBounds(points[0], points[0]);
-    points.forEach((point) => bounds.extend(point));
-    // The map's camera padding already clears the sheet / docked panel; MapLibre adds these margins to it.
-    mapRef.current.fitBounds(bounds, {
-      padding: { top: 90, right: 40, bottom: 30, left: 30 },
-      maxZoom: 16,
+    const camera = routeCamera(
+      points, viewport.width, viewport.height, leftPadding, bottomPadding,
+    );
+    if (!camera || camera.key === lastFit.current || !mapRef.current) return;
+    lastFit.current = camera.key;
+    mapRef.current.easeTo({
+      ...camera,
       duration: 500,
     });
-  }, [lines]);
+  }, [lines, viewport, leftPadding, bottomPadding, attempt]);
 
   // User location dot.
   useEffect(() => {
