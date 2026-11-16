@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Checkbox, Radio } from "~/components/material";
 import TransitMap from "~/components/map/transit-map";
@@ -16,6 +16,8 @@ import { mapStyleUrl } from "~/lib/map-config";
 import { distanceMeters, formatDistance, type GeoPoint } from "~/lib/places";
 import { LOCAL_PROVIDERS, usePreferences } from "~/lib/preferences";
 import { searchTransit } from "~/lib/transit/client";
+import { emmaSearch, mergeStops } from "~/lib/transit/emma";
+import { recommendStations } from "~/lib/transit/recommendations";
 import { planJourney } from "~/lib/transit/planner";
 import { useClock, useRemote } from "~/lib/transit/hooks";
 import { clock } from "~/lib/transit/model";
@@ -658,6 +660,17 @@ function PlannerSearch({
       ),
     { debounce: 350, active },
   );
+  // Same sources as the main search: BKK, the app's own MÁV/EMMA search, led by the Android recommendation.
+  const emma = useRemote(
+    query.trim().length >= 2 ? `emma-search:${query.trim()}` : "",
+    (signal) => emmaSearch(query, signal),
+    { debounce: 400, active },
+  );
+  const stops = useMemo(() => {
+    const found = mergeStops(transit.data?.value.stops ?? [], emma.data?.value ?? []);
+    const best = recommendStations(found, query, userPosition, [])[0];
+    return best ? [best, ...found.filter((stop) => stop.id !== best.id)] : found;
+  }, [transit.data, emma.data, query, userPosition]);
   const places = search.query === query ? search.places : [];
   const searching =
     query.trim().length >= 2 && (search.query !== query || search.loading);
@@ -701,12 +714,14 @@ function PlannerSearch({
           ) : (
             <>
               <DataStatus
-                {...transit.data}
+                at={transit.data?.at}
+                incomplete={Boolean(transit.data?.incomplete) || (Boolean(transit.error) && stops.length > 0)}
+                fallbackUnavailable={Boolean(emma.error) && !transit.error}
                 loading={transit.loading}
-                error={transit.error}
+                error={stops.length ? "" : transit.error || emma.error}
                 retry={transit.retry}
               />
-              {transit.data?.value.stops.map((stop) => (
+              {stops.map((stop) => (
                 <StopRow
                   key={stop.id}
                   stop={stop}

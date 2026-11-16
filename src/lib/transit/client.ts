@@ -275,6 +275,28 @@ export async function stopsAt(
     ...new Map(stops.map((stop) => [stop.id, stop])).values(),
   ]);
 }
+/**
+ * Every live vehicle of one BKK-served line (Worker `vehicles-for-route`), independent of the map area:
+ * a highlighted line shows all its vehicles at any zoom, like Android's focused route.
+ */
+export async function routeVehicles(
+  routeId: string,
+  signal: AbortSignal,
+): Promise<Snapshot<Vehicle[]>> {
+  const root = await request(
+    "vehicles-for-route",
+    { routeId, includeReferences: "routes,trips" },
+    signal,
+  );
+  const routes = parseRoutes(refs(root));
+  return snapshot(
+    root,
+    array(object(root.data).list).flatMap((row) => {
+      const vehicle = parseVehicle(row, routes);
+      return vehicle ? [vehicle] : [];
+    }),
+  );
+}
 export async function vehiclesAt(
   point: GeoPoint,
   radius: number,

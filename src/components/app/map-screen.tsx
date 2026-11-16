@@ -12,7 +12,7 @@ import TransitMap from "~/components/map/transit-map";
 import { CookieIconButton, Icon } from "~/components/ui";
 import { mapStyleUrl, sheetPeekHeight } from "~/lib/map-config";
 import { distanceMeters } from "~/lib/places";
-import { boards, stopsAt, vehiclesAt, knownStops } from "~/lib/transit/client";
+import { boards, routeVehicles, stopsAt, vehiclesAt, knownStops } from "~/lib/transit/client";
 import { journeyStops } from "~/components/map/stop-directions";
 import { vehicleLineColor } from "~/lib/transit/labels";
 import {
@@ -215,16 +215,28 @@ export function MapScreen({
     () => (journey ? journeyStops(journey.value) : stops),
     [journey, stops],
   );
+  const focusedRouteId =
+    selectedRoute?.id ?? selectedVehicle?.route?.id ?? journey?.value.routeId;
+  // The highlighted line's own vehicles, whatever the zoom or map area (Worker-served lines only;
+  // MÁV-only `emma:` lines keep the area vehicles).
+  const routeVehicleResource = useRemote(
+    focusedRouteId && !focusedRouteId.startsWith("emma:") ? `route-vehicles:${focusedRouteId}` : "",
+    (signal) => routeVehicles(focusedRouteId!, signal),
+    { active: active && !searchOpen, interval: 10_000, keepPrevious: false },
+  );
   const displayedVehicles = useMemo(() => {
-    const focused =
-      selectedRoute?.id ?? selectedVehicle?.route?.id ?? journey?.value.routeId;
-    return focused
-      ? vehicles.filter(
-          (vehicle) =>
-            vehicle.route?.id === focused || vehicle.id === selectedVehicle?.id,
-        )
-      : vehicles;
-  }, [vehicles, selectedRoute, selectedVehicle, journey]);
+    if (!focusedRouteId) return vehicles;
+    const onLine = mergeVehicles(
+      routeVehicleResource.data?.value ?? [],
+      vehicles.filter((vehicle) => vehicle.route?.id === focusedRouteId),
+    ).filter((vehicle) => now - vehicle.observedAt < 180_000);
+    // The selected vehicle stays visible even when no list contains it yet.
+    if (selectedVehicle && !onLine.some((vehicle) => vehicle.id === selectedVehicle.id)) {
+      const live = vehicles.find((vehicle) => vehicle.id === selectedVehicle.id);
+      onLine.push(live ?? selectedVehicle);
+    }
+    return onLine;
+  }, [vehicles, focusedRouteId, routeVehicleResource.data, selectedVehicle, now]);
   // NearbyDepartures.kt: anchor on the user when they are near the map centre, else on the centre;
   // board the six closest stops within 1.5 km and show the first three that have departures.
   const userLat = location.position?.lat;

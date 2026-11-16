@@ -90,9 +90,9 @@ function timely(trip: Itinerary, ready: number) {
 const near = (a?: GeoPoint, b?: GeoPoint) => !a || !b || distanceMeters(a, b) <= 200;
 const rides = (trip: Itinerary) => trip.legs.filter((leg) => !walking(leg));
 const provider = (leg: Leg) =>
-  /^(volan|emma:hkir:|hkir:)/.test(leg.routeId ?? "")
+  /^(volan|emma:hkir:)/.test(leg.routeId ?? "")
     ? "volan"
-    : ["RAIL", "SUBURBAN_RAILWAY", "TRAMTRAIN"].includes(leg.mode) || (leg.routeId ?? "").startsWith("1:")
+    : ["RAIL", "SUBURBAN_RAILWAY", "TRAMTRAIN"].includes(leg.mode) || (leg.routeId ?? "").startsWith("emma:1:")
       ? "rail"
       : "bkk";
 
@@ -283,7 +283,8 @@ function parseEmmaPlan(data: Row, ready: number) {
         const fromPosition = point(from),
           toPosition = point(to);
         return {
-          routeId: routeId || undefined,
+          // The app's EMMA identities (`emma:hkir:…` Volán, `emma:1:…` MÁV), so badges use operator colours.
+          routeId: routeId ? `emma:${routeId}` : undefined,
           mode,
           name,
           color: color(route.color, mode === "RAIL" ? "#0066aa" : "#199dcf"),
