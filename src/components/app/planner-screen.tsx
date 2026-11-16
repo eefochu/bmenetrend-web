@@ -21,7 +21,7 @@ import { recommendStations } from "~/lib/transit/recommendations";
 import { planJourney } from "~/lib/transit/planner";
 import { useClock, useRemote } from "~/lib/transit/hooks";
 import { clock } from "~/lib/transit/model";
-import { DataStatus, StopRow } from "./transit-components";
+import { DataStatus } from "./transit-components";
 import { t } from "~/lib/strings";
 import { useBackLayer } from "~/lib/use-back-layer";
 import type { UserLocation } from "~/lib/use-user-location";
@@ -30,10 +30,14 @@ import {
   DistancePill,
   ExampleChips,
   SearchGroupTitle,
+  SearchRecommendation,
   SearchResultCard,
+  StopSearchRow,
   TransitSearchInput,
   usePlaceSearch,
 } from "./search-components";
+import { stopSubtitle } from "~/lib/transit/labels";
+import type { Stop } from "~/lib/transit/model";
 
 type Endpoint = {
   id: string;
@@ -666,11 +670,19 @@ function PlannerSearch({
     (signal) => emmaSearch(query, signal),
     { debounce: 400, active },
   );
-  const stops = useMemo(() => {
-    const found = mergeStops(transit.data?.value.stops ?? [], emma.data?.value ?? []);
-    const best = recommendStations(found, query, userPosition, [])[0];
-    return best ? [best, ...found.filter((stop) => stop.id !== best.id)] : found;
-  }, [transit.data, emma.data, query, userPosition]);
+  const { favorites } = usePreferences();
+  const stops = useMemo(
+    () => mergeStops(transit.data?.value.stops ?? [], emma.data?.value ?? []),
+    [transit.data, emma.data],
+  );
+  // CategorizedSearch.kt, as in the main search: the best station leads as "Talán ezt keresed".
+  const recommendation = useMemo(
+    () => recommendStations(stops, query, userPosition, favorites)[0],
+    [stops, query, userPosition, favorites],
+  );
+  const otherStops = recommendation ? stops.filter((stop) => stop.id !== recommendation.id) : stops;
+  const chooseStop = (stop: Stop) =>
+    onChoose({ id: stop.id, name: stop.name, detail: stopSubtitle(stop), position: stop.position });
   const places = search.query === query ? search.places : [];
   const searching =
     query.trim().length >= 2 && (search.query !== query || search.loading);
@@ -721,20 +733,28 @@ function PlannerSearch({
                 error={stops.length ? "" : transit.error || emma.error}
                 retry={transit.retry}
               />
-              {stops.map((stop) => (
-                <StopRow
-                  key={stop.id}
-                  stop={stop}
-                  onSelect={() =>
-                    onChoose({
-                      id: stop.id,
-                      name: stop.name,
-                      detail: `${stop.platform ? stop.platform + " peron · " : ""}${stop.source}`,
-                      position: stop.position,
-                    })
-                  }
-                />
-              ))}
+              {recommendation && (
+                <SearchRecommendation stop={recommendation} onClick={() => chooseStop(recommendation)} />
+              )}
+              {(otherStops.length > 0 || transit.loading) && (
+                <>
+                  <SearchGroupTitle title={t.searchStations} />
+                  {transit.loading && !stops.length && <RefreshBar visible inset={22} />}
+                  <div className="segment-group">
+                    {otherStops.map((stop, index) => (
+                      <StopSearchRow
+                        key={stop.id}
+                        stop={stop}
+                        favorite={favorites.includes(stop.id)}
+                        userPosition={userPosition}
+                        onStop={chooseStop}
+                        index={index}
+                        count={otherStops.length}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
               {places.length > 0 && (
                 <>
                   <SearchGroupTitle title={t.searchPlaces} />
@@ -778,7 +798,7 @@ function PlannerSearch({
                   </p>
                 </>
               )}
-              {!searching && places.length === 0 && (
+              {!searching && !transit.loading && places.length === 0 && stops.length === 0 && (
                 <p className="status-line t-body-medium">
                   {search.unavailable
                     ? t.plannerSearchError
