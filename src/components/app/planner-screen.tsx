@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Checkbox, Radio } from "~/components/material";
 import TransitMap from "~/components/map/transit-map";
@@ -7,16 +7,19 @@ import {
   Dialog,
   EmptyState,
   Icon,
+  PageHeader,
   RefreshBar,
   ShapeIconTile,
 } from "~/components/ui";
+import { ItineraryCard, JourneyDetail, PLANNER_SOURCE } from "./journey-components";
 import { mapStyleUrl } from "~/lib/map-config";
 import { distanceMeters, formatDistance, type GeoPoint } from "~/lib/places";
 import { LOCAL_PROVIDERS, usePreferences } from "~/lib/preferences";
-import { planTrip, searchTransit } from "~/lib/transit/client";
-import { useRemote } from "~/lib/transit/hooks";
-import { clock, type Itinerary } from "~/lib/transit/model";
-import { DataStatus, StopRow, RouteBadge } from "./transit-components";
+import { searchTransit } from "~/lib/transit/client";
+import { planJourney } from "~/lib/transit/planner";
+import { useClock, useRemote } from "~/lib/transit/hooks";
+import { clock } from "~/lib/transit/model";
+import { DataStatus, StopRow } from "./transit-components";
 import { t } from "~/lib/strings";
 import { useBackLayer } from "~/lib/use-back-layer";
 import type { UserLocation } from "~/lib/use-user-location";
@@ -221,18 +224,157 @@ export function PlannerScreen({
       <button
         type="button"
         className="button button-filled button-block button-tall"
-        disabled={!effectiveOrigin || !destination || result.loading}
-        onClick={find}
+        disabled={(!effectiveOrigin && !useLocation) || !destination || result.loading}
+        onClick={() => find()}
       >
         <Icon name="route" size={20} />
         {t.plannerFind}
       </button>
-      <p className="t-body-small on-variant">
-        BKK API · A helyi ViaBusz, HOMM és KanyarGO menetrendek külön
-        integrációt igényelnek.
-      </p>
     </div>
   );
+
+  const endpointName = (endpoint: Endpoint | null) =>
+    endpoint?.id === "current" ? t.plannerCurrent : (endpoint?.name ?? "");
+  const picker = pickerOpen && (
+    <DeparturePicker
+      open
+      departure={departure}
+      onClose={() => setPickerOpen(false)}
+      onConfirm={(value) => {
+        setDeparture(value);
+        setPickerOpen(false);
+      }}
+    />
+  );
+  const endpoints = (
+    <div className="endpoints">
+      <div className="endpoints-fields">
+        <EndpointField field="origin" endpoint={effectiveOrigin} current={useLocation} onClick={() => setEditing("origin")} />
+        <hr className="endpoint-divider" />
+        <EndpointField field="destination" endpoint={destination} current={false} onClick={() => setEditing("destination")} />
+      </div>
+      <CookieIconButton label={t.plannerSwap} size={52} tone="high" onClick={swap} disabled={!effectiveOrigin && !destination}>
+        <Icon name="swap_vert" />
+      </CookieIconButton>
+    </div>
+  );
+  const departureChip = (
+    <button type="button" className="assist-chip" onClick={() => setPickerOpen(true)}>
+      <Icon name="schedule" size={18} />
+      {departure ? departureLabel(departure) : t.plannerLeaveNow}
+      <Icon name="expand_more" size={16} />
+    </button>
+  );
+
+  const selected = outcome?.itineraries.find((trip) => trip.id === selectedId);
+  if (selected && outcome && planRequest)
+    return (
+      <JourneyDetail
+        trip={selected}
+        readyAt={outcome.readyAt}
+        originName={endpointName(planRequest.from)}
+        destinationName={endpointName(planRequest.to)}
+        now={now}
+        departureText={departure ? departureLabel(departure) : t.plannerLeaveNow}
+        onBack={() => setSelectedId(null)}
+      />
+    );
+
+  if (resultsView) {
+    const planning = result.loading;
+    const itineraries = outcome?.itineraries ?? [];
+    const error =
+      planError ??
+      (result.error
+        ? "Az útvonaltervezés átmenetileg nem érhető el. Ellenőrizd a kapcsolatot, és próbáld újra."
+        : outcome && !itineraries.length
+          ? "A megadott időpontban nem találtunk megfelelő útvonalat. Próbálj másik időpontot vagy kiindulópontot."
+          : null);
+    const base = departure ?? new Date(outcome?.readyAt ?? now);
+    return (
+      <div className="fullscreen-layer page planner-results" role="dialog" aria-modal="true" aria-label={t.plannerTitle}>
+        <PageHeader
+          title={t.plannerTitle}
+          onBack={() => setResultsView(false)}
+          actions={
+            <CookieIconButton label="Újratervezés" size={48} disabled={planning} onClick={() => find()}>
+              <Icon name="refresh" className={planning ? "spinning" : ""} />
+            </CookieIconButton>
+          }
+        />
+        <div className="page-scroll">
+          <div className="planner-results-column">
+            {endpoints}
+            <div className="chip-row tight">{departureChip}</div>
+            {itineraries.length > 0 && (
+              <div className="planner-shift">
+                <button
+                  type="button"
+                  className="button button-outlined"
+                  disabled={planning || base.getTime() - 15 * 60_000 <= now}
+                  onClick={() => shift(-15)}
+                >
+                  <Icon name="arrow_back" size={18} />
+                  15 perccel korábban
+                </button>
+                <button type="button" className="button button-outlined" disabled={planning} onClick={() => shift(15)}>
+                  15 perccel később
+                  <Icon name="arrow_forward" size={18} />
+                </button>
+              </div>
+            )}
+            <button
+              type="button"
+              className="button button-filled button-block button-tall"
+              disabled={(!effectiveOrigin && !useLocation) || !destination || planning}
+              onClick={() => find()}
+            >
+              {planning ? (
+                <>
+                  <span className="button-spinner" aria-hidden="true" />
+                  Megfelelő útvonal keresése…
+                </>
+              ) : (
+                <>
+                  <Icon name="route" size={20} />
+                  {t.plannerFind}
+                </>
+              )}
+            </button>
+            {error && !planning && <div className="planner-error t-body-medium">{error}</div>}
+            {outcome && itineraries.length > 0 && !planning && (
+              <>
+                {outcome.partial && (
+                  <p className="t-body-medium on-variant">
+                    Egyes menetrendek vagy gyalogos kapcsolatok most nem érhetők el, ezért további útvonalak is
+                    lehetségesek. Próbálj újratervezni.
+                  </p>
+                )}
+                <div>
+                  <h2 className="t-title-large-emphasized">Útvonalak</h2>
+                  <p className="t-body-small on-variant">
+                    Lekérdezve: {clock(outcome.requestedAt)} · kényelem és utazási idő szerint
+                  </p>
+                </div>
+                {itineraries.map((trip, index) => (
+                  <ItineraryCard
+                    key={trip.id}
+                    trip={trip}
+                    recommended={index === 0}
+                    now={now}
+                    ready={outcome.readyAt}
+                    onClick={() => setSelectedId(trip.id)}
+                  />
+                ))}
+                <p className="t-body-small on-variant">{PLANNER_SOURCE}</p>
+              </>
+            )}
+          </div>
+        </div>
+        {picker}
+      </div>
+    );
+  }
 
   return (
     <div className="planner">
@@ -298,48 +440,13 @@ export function PlannerScreen({
               destination: destination?.position ?? null,
             }}
             routeColor={preferences.scheme.primary}
-            lines={planLines}
           />
           <MapAttribution className="planner-attribution" />
         </div>
         {destination && <div className="planner-find-narrow">{findButton}</div>}
-        {planRequest && (
-          <div className="journey-results">
-            <DataStatus
-              {...result.data}
-              loading={result.loading}
-              error={result.error}
-              retry={result.retry}
-            />
-            {result.data?.value.map((row, index) => (
-              <JourneyCard
-                key={row.id}
-                itinerary={row}
-                selected={selectedItinerary === index}
-                onSelect={() => setSelectedItinerary(index)}
-              />
-            ))}
-            {result.data && !result.data.value.length && (
-              <p className="status-line">
-                Nincs elérhető útvonal erre az időpontra. Próbálj másik indulást
-                vagy közeli megállót.
-              </p>
-            )}
-          </div>
-        )}
       </div>
 
-      {pickerOpen && (
-        <DeparturePicker
-          open
-          departure={departure}
-          onClose={() => setPickerOpen(false)}
-          onConfirm={(value) => {
-            setDeparture(value);
-            setPickerOpen(false);
-          }}
-        />
-      )}
+      {picker}
       <Dialog
         open={servicesOpen}
         onClose={() => setServicesOpen(false)}
@@ -668,89 +775,5 @@ function PlannerSearch({
         </div>
       </div>
     </div>
-  );
-}
-
-function JourneyCard({
-  itinerary,
-  selected,
-  onSelect,
-}: {
-  itinerary: Itinerary;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <article className={`journey-card ${selected ? "journey-selected" : ""}`}>
-      <button
-        type="button"
-        className="journey-card-heading"
-        onClick={onSelect}
-        aria-pressed={selected}
-      >
-        <span>
-          <strong className="t-title-large">
-            {clock(itinerary.start)} – {clock(itinerary.end)}
-          </strong>
-          <small className="on-variant">
-            {Math.round((itinerary.end - itinerary.start) / 60_000)} perc ·{" "}
-            {Math.round(itinerary.walkMeters)} m séta · BKK API
-          </small>
-        </span>
-        <Icon name={selected ? "expand_less" : "expand_more"} />
-      </button>
-      <div className="journey-modes">
-        {itinerary.legs.map((leg, index) =>
-          leg.mode === "WALK" ? (
-            <span key={index} className="journey-walk">
-              <Icon name="directions_walk" size={20} />
-              {Math.round((leg.end - leg.start) / 60_000)}′
-            </span>
-          ) : (
-            <RouteBadge
-              key={index}
-              route={{
-                id: leg.routeId ?? "",
-                mode: leg.mode,
-                name: leg.name || leg.mode,
-                description: "",
-                color: leg.color,
-                textColor: "#fff",
-              }}
-            />
-          ),
-        )}
-      </div>
-
-      {selected && (
-        <ol className="journey-legs">
-          {itinerary.legs.map((leg, index) => (
-            <li key={index}>
-              <strong>
-                {clock(leg.start)} · {leg.from}
-              </strong>
-              <p>
-                {leg.mode === "WALK"
-                  ? "Séta"
-                  : `${leg.name || leg.mode}${leg.live ? " · valós idejű" : " · menetrend"}`}{" "}
-                → {leg.to}
-              </p>
-              <small className="on-variant">
-                Érkezés: {clock(leg.end)}
-                {leg.intermediate.length
-                  ? ` · ${leg.intermediate.length} köztes megálló`
-                  : ""}
-              </small>
-              {leg.intermediate.length > 0 && (
-                <details>
-                  <summary>Köztes megállók</summary>
-                  <p>{leg.intermediate.join(" · ")}</p>
-                </details>
-              )}
-            </li>
-          ))}
-        </ol>
-      )}
-    </article>
   );
 }

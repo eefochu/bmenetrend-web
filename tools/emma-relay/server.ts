@@ -250,15 +250,24 @@ export function createEmmaRelay({
     let shared = pending.get(key);
     if (!shared) {
       times = times.filter((time) => Date.now() - time < 60_000);
-      if (times.length >= 60 || inFlight >= 4) {
+      if (times.length >= 60) {
         headers.set("Retry-After", "10");
         return error("Local adapter request limit", 429);
+      }
+      if (inFlight >= 6) {
+        // Momentary congestion (a slow national plan holds a slot): retry shortly, no global pause.
+        headers.set("Retry-After", "1");
+        return error("Local adapter busy", 429);
       }
       times.push(Date.now());
       inFlight++;
       shared = (async () => {
         const controller = new AbortController(),
-          timer = setTimeout(() => controller.abort(), 6000);
+          // EMMA's national planner routinely needs 8–10 s; other queries keep the short limit.
+          timer = setTimeout(
+            () => controller.abort(),
+            operation === "plan" || operation === "planWalkAverse" ? 20_000 : 6000,
+          );
         try {
           const upstream = await upstreamFetch(OFFICIAL_EMMA_URL, {
             method: "POST",

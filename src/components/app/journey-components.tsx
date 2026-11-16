@@ -223,16 +223,12 @@ function LegDescription({ leg }: { leg: Leg }) {
 }
 
 /** The arrival and departure are one point when the source reports the same instant and place. */
-const sharedJunction = (previous?: Leg, next?: Leg) =>
-  Boolean(
-    previous &&
-      next &&
-      previous.end === next.start &&
-      previous.toPosition &&
-      next.fromPosition &&
-      Math.abs(previous.toPosition.lat - next.fromPosition.lat) < 1e-5 &&
-      Math.abs(previous.toPosition.lon - next.fromPosition.lon) < 1e-5,
-  );
+function sharedJunction(previous?: Leg, next?: Leg) {
+  const a = previous?.toPosition,
+    b = next?.fromPosition;
+  if (!a || !b || previous?.end !== next?.start) return false;
+  return Math.abs(a.lat - b.lat) < 1e-5 && Math.abs(a.lon - b.lon) < 1e-5;
+}
 
 export function JourneyDetail({
   trip,

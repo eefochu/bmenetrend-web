@@ -157,3 +157,14 @@ test("Volán stop boards and trips pass, other operators' IDs do not", () => {
   expect(() => validateOperation(EMMA_QUERIES.trip, { id: "hkir:hkir_8464_328-3" })).not.toThrow();
   expect(() => validateOperation(EMMA_QUERIES.trip, { id: "BKK:F00057" })).toThrow();
 });
+test("planner queries accept coordinates in Hungary and a near date only", async () => {
+  const { EMMA_QUERIES: Q } = await import("../src/lib/transit/emma-contract");
+  const today = new Date().toISOString().slice(0, 10);
+  const ok = { from: "47.570300,18.404000", to: "47.473100,18.823700", date: today, time: "07:21:00" };
+  expect(() => validateOperation(Q.plan, ok)).not.toThrow();
+  expect(() => validateOperation(Q.planWalkAverse, ok)).not.toThrow();
+  expect(() => validateOperation(Q.plan, { ...ok, from: "Budapest::47.5,19.0" })).toThrow();
+  expect(() => validateOperation(Q.plan, { ...ok, to: "52.52,13.40" })).toThrow();
+  expect(() => validateOperation(Q.plan, { ...ok, date: "2020-01-01" })).toThrow();
+  expect(() => validateOperation(Q.plan, { ...ok, time: "25:00:00" })).toThrow();
+});

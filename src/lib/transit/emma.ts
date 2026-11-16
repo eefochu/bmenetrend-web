@@ -27,11 +27,15 @@ export const EMMA_URL = endpoint();
 const cache = new Map<string, { data: Row; at: number; expires: number }>();
 let blockedUntil = 0;
 
+/** EMMA's national planner routinely needs 8–10 s; other queries answer within a few seconds. */
+const timeoutFor = (query: string) =>
+  query === EMMA_QUERIES.plan || query === EMMA_QUERIES.planWalkAverse ? 22_000 : 8000;
+
 async function emmaFetch(query: string, variables: Row, ttl: number, signal: AbortSignal) {
   const controller = new AbortController();
   const cancel = () => controller.abort();
   signal.addEventListener("abort", cancel, { once: true });
-  const timer = setTimeout(cancel, 8000);
+  const timer = setTimeout(cancel, timeoutFor(query));
   try {
     const response = await fetch(EMMA_URL, {
       method: "POST",
@@ -42,8 +46,9 @@ async function emmaFetch(query: string, variables: Row, ttl: number, signal: Abo
       signal: controller.signal,
     });
     if (response.status === 429) {
-      // Only an explicit rate limit pauses every MÁV request.
+      // A short Retry-After is momentary congestion: retry this request. Longer ones pause every MÁV request.
       const retry = Number(response.headers.get("Retry-After"));
+      if (retry > 0 && retry <= 2) throw new EmmaError("Az EMMA most foglalt.", true, retry * 1000);
       blockedUntil = Date.now() + (retry > 0 ? Math.min(retry, 120) * 1000 : 30_000);
       throw new EmmaError(`Az EMMA nem érhető el (429).`, false);
     }
@@ -75,6 +80,7 @@ class EmmaError extends Error {
   constructor(
     message: string,
     public transient: boolean,
+    public retryAfter = 600,
   ) {
     super(message);
   }
@@ -104,7 +110,7 @@ export async function emmaQuery(
     result = await emmaFetch(query, variables, ttl, signal);
   } catch (error) {
     if (!(error instanceof EmmaError) || !error.transient || signal.aborted) throw error;
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await new Promise((resolve) => setTimeout(resolve, error.retryAfter));
     if (signal.aborted) throw new DOMException("Megszakítva", "AbortError");
     result = await emmaFetch(query, variables, ttl, signal);
   }
