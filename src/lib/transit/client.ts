@@ -1,4 +1,4 @@
-import { emmaBoard, emmaTrip } from "./emma";
+import { emmaBoard, emmaTrip, isVolanId } from "./emma";
 import type { GeoPoint } from "~/lib/places";
 import {
   appStopId,
@@ -12,6 +12,7 @@ import {
   parseStop,
   parseVehicle,
   polyline,
+  position,
   type Row,
   type Snapshot,
   type Stop,
@@ -60,6 +61,11 @@ export const message = (error: unknown) =>
     ? error.message
     : "A közlekedési adatok nem érhetők el.";
 const abort = () => new DOMException("Megszakítva", "AbortError");
+/** Planner calls the client budget still allows this minute (BkkWorkerRepository.planHeadroom). */
+export function planHeadroom() {
+  const now = Date.now();
+  return Math.max(0, 8 - plans.filter((time) => now - time < 60_000).length);
+}
 
 /** Map/nearby polling: kept below the full budget so taps on stops, trips and lines always have headroom. */
 const BACKGROUND = new Set([
@@ -375,13 +381,29 @@ export async function board(
 ): Promise<Snapshot<Departure[]>> {
   if (stop.source === "EMMA" && stop.id.startsWith("emma:1:"))
     return emmaBoard(stop, minutes, signal);
+  // TransitViewModel.fetchBoards: FUTÁR serves two hours and knows rural Volán stops (Császár, Kecskéd…)
+  // and railway stations outside Budapest (Balatonföldvár…) without their timetables. A stop EMMA also
+  // serves therefore uses EMMA beyond two hours, or when BKK fails or answers empty.
+  const emma = emmaServes(stop);
+  if (emma && minutes > 120) return emmaBoard(stop, minutes, signal);
+  let primary: Snapshot<Departure[]> | undefined;
   try {
-    return await workerBoard(stop, minutes, signal);
+    primary = await workerBoard(stop, minutes, signal);
+    if (!emma || primary.value.length > 0) return primary;
   } catch (error) {
-    if (signal.aborted || !stop.id.startsWith("emma:1:")) throw error;
-    return emmaBoard(stop, minutes, signal);
+    if (signal.aborted || !emma) throw error;
+  }
+  try {
+    return await emmaBoard(stop, minutes, signal);
+  } catch (error) {
+    // An empty BKK answer is still a real answer when MÁV cannot be reached.
+    if (primary && !signal.aborted) return primary;
+    throw error;
   }
 }
+
+/** Stops whose official MÁV (`emma:1:`) or Volán (`emma:hkir:`) board EMMA can supply. */
+const emmaServes = (stop: Stop) => stop.id.startsWith("emma:1:") || isVolanId(stop.id);
 
 async function workerBoard(
   stop: Stop,
@@ -414,10 +436,8 @@ export async function boards(
   minutes: number,
   signal: AbortSignal,
 ): Promise<(Departure[] | null)[]> {
-  const direct = (stop: Stop) =>
-    stop.source === "EMMA" && stop.id.startsWith("emma:1:");
   const fallback = async (stop: Stop) => {
-    if (!stop.id.startsWith("emma:1:")) return null;
+    if (!emmaServes(stop)) return null;
     try {
       return (await emmaBoard(stop, minutes, signal)).value;
     } catch (error) {
@@ -425,6 +445,9 @@ export async function boards(
       return null;
     }
   };
+  const direct = (stop: Stop) =>
+    (stop.source === "EMMA" && stop.id.startsWith("emma:1:")) ||
+    (emmaServes(stop) && minutes > 120);
   const worker = stops.filter((stop) => !direct(stop));
   const results = new Map<string, Departure[] | null>();
   for (let index = 0; index < worker.length; index += 6) {
@@ -448,11 +471,14 @@ export async function boards(
     const ok = new Set(
       array(object(root?.data).successfulStopIds).map(string),
     );
-    for (const stop of chunk)
+    for (const stop of chunk) {
+      const rows = root && ok.has(stop.rawId) ? boardRows(root, stop) : null;
+      // An empty FUTÁR board is not final for MÁV and Volán stops; EMMA has their timetables.
       results.set(
         stop.id,
-        root && ok.has(stop.rawId) ? boardRows(root, stop) : await fallback(stop),
+        rows && (rows.length > 0 || !emmaServes(stop)) ? rows : ((await fallback(stop)) ?? rows),
       );
+    }
   }
   await Promise.all(
     stops
@@ -506,7 +532,7 @@ export async function tripDetails(
   tripId: string,
   signal: AbortSignal,
 ): Promise<Snapshot<Journey>> {
-  if (tripId.startsWith("emma:1:")) return emmaTrip(tripId, signal);
+  if (tripId.startsWith("emma:1:") || isVolanId(tripId)) return emmaTrip(tripId, signal);
   const root = await request(
     "trip-details",
     { tripId, includeReferences: "routes,trips,stops" },
@@ -598,13 +624,22 @@ export async function planTrip(
             end = number(leg.endTime);
           if (!start || end < start || !string(leg.mode))
             throw new Error("Hibás szakasz");
+          const from = object(leg.from),
+            to = object(leg.to);
           return {
             routeId: string(leg.routeId),
             mode: string(leg.mode),
             name: string(leg.routeShortName) || string(leg.route),
             color: color(leg.routeColor),
-            from: string(object(leg.from).name),
-            to: string(object(leg.to).name),
+            from: string(from.name),
+            to: string(to.name),
+            fromPosition: position(from) ?? undefined,
+            toPosition: position(to) ?? undefined,
+            fromPlatform: string(from.platformCode) || undefined,
+            toPlatform: string(to.platformCode) || undefined,
+            headsign: string(leg.headsign) || undefined,
+            distance: number(leg.distance),
+            stayOnBoard: leg.interlineWithPreviousLeg === true,
             start,
             end,
             live: leg.realTime === true,
@@ -612,6 +647,7 @@ export async function planTrip(
             intermediate: array(leg.intermediateStops).map((stop) =>
               string(object(stop).name),
             ),
+            source: "BKK API" as const,
           };
         });
         if (

@@ -208,12 +208,19 @@ test("map areas keep the previous area's data until the new area loads", async (
   }
   await mount(<Probe area="first" />);
   await act(async () => {
-    root!.render(<Probe area="second" />);
     await sleep(10);
   });
   expect(shown.at(-1)).toBe("first area");
   await act(async () => {
-    expect(finish).toBeDefined();
+    root!.render(<Probe area="second" />);
+  });
+  await act(async () => {
+    await sleep(10);
+  });
+  // The second area is loading; its markers still show the first area.
+  expect(finish).toBeDefined();
+  expect(shown.at(-1)).toBe("first area");
+  await act(async () => {
     finish?.(snapshot("second area"));
     await sleep(10);
   });

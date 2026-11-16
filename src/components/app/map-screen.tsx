@@ -107,7 +107,7 @@ export function MapScreen({
   );
   const emmaStopResource = useRemote(
     `emma-stops:${areaKey}`,
-    (signal) => emmaStops(area, area.radius, signal),
+    (signal) => emmaStops(area, signal),
     {
       active: active && !searchOpen && area.zoom >= 9,
       interval: 300_000,
@@ -117,7 +117,7 @@ export function MapScreen({
   );
   const emmaVehicleResource = useRemote(
     `emma-vehicles:${areaKey}`,
-    (signal) => emmaVehicles(area, area.radius, signal),
+    (signal) => emmaVehicles(area, signal),
     {
       active: active && !searchOpen && area.zoom >= 7,
       interval: 15_000,

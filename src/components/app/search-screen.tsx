@@ -14,6 +14,7 @@ import {
 } from "~/lib/places";
 import { searchTransit, knownStops } from "~/lib/transit/client";
 import { emmaSearch, mergeStops } from "~/lib/transit/emma";
+import { recommendStations } from "~/lib/transit/recommendations";
 import { useRemote } from "~/lib/transit/hooks";
 import type { Stop, Vehicle, Route } from "~/lib/transit/model";
 import { DataStatus, RouteBadge } from "./transit-components";
@@ -102,9 +103,17 @@ export function SearchScreen({
   );
   const vehicles = transit.data?.value.vehicles ?? [];
   const routes = transit.data?.value.routes ?? [];
-  // CategorizedSearch.kt: the best station match leads as a recommendation and is not repeated below.
-  const recommendation =
-    category === "all" || category === "stations" ? stops[0] : undefined;
+  // CategorizedSearch.kt: StationRecommendations scores every found station (BKK, MÁV and the local
+  // catalogue); the best leads as "Talán ezt keresed" and is not repeated below.
+  const recommendation = useMemo(
+    () =>
+      category === "all" || category === "stations"
+        ? recommendStations(mergeStops(stops, local), query, userPosition, favorites)[0]
+        : undefined,
+    // `stops` is rebuilt every render; its inputs are the remote results and the local matches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [category, transit.data, emma.data, local, query, userPosition, favorites],
+  );
   const otherStops = recommendation ? stops.slice(1) : stops;
   const favoriteStops = knownStops().filter((stop) => favorites.includes(stop.id)).slice(0, 5);
   const shownStops = otherStops.slice(0, limit);
@@ -186,15 +195,14 @@ export function SearchScreen({
             </>
           ) : (
             <>
+              {/* The Worker always reports its own MÁV fallback as unavailable; this app queries MÁV itself,
+                  so only an actual failure of that search is worth a note, never a red error over BKK results. */}
               <DataStatus
                 {...transit.data}
-                fallbackUnavailable={Boolean(
-                  transit.data?.fallbackUnavailable &&
-                  !emma.data &&
-                  !emma.loading,
-                )}
+                fallbackUnavailable={Boolean(emma.error) && !transit.error}
+                incomplete={Boolean(transit.data?.incomplete) || (Boolean(transit.error) && stops.length > 0)}
                 loading={transit.loading}
-                error={transit.error || emma.error}
+                error={stops.length ? "" : transit.error || emma.error}
                 retry={transit.retry}
               />
               {recommendation && (

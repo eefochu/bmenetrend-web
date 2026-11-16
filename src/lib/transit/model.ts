@@ -73,11 +73,22 @@ export type Leg = {
   color: string;
   from: string;
   to: string;
+  /** Source positions of the leg's ends (PlanPoint). */
+  fromPosition?: GeoPoint;
+  toPosition?: GeoPoint;
+  fromPlatform?: string;
+  toPlatform?: string;
+  headsign?: string;
+  /** Metres, as reported by the planner. */
+  distance: number;
+  /** interlineWithPreviousLeg: the rider stays on the vehicle (PlanLeg.stayOnBoard). */
+  stayOnBoard: boolean;
   start: number;
   end: number;
   live: boolean;
   geometry: [number, number][];
   intermediate: string[];
+  source: Source;
 };
 export type Itinerary = {
   id: string;

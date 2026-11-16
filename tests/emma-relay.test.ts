@@ -85,6 +85,9 @@ test("unapproved origins, arbitrary GraphQL and oversized areas never reach upst
     (await handler(request(EMMA_QUERIES.trip, { id: "BKK_F00057" }))).status,
   ).toBe(400);
   expect(
+    (await handler(request(EMMA_QUERIES.trip, { id: "BKK:F00057" }))).status,
+  ).toBe(400);
+  expect(
     (
       await handler(
         request(EMMA_QUERIES.trip, {
@@ -145,4 +148,12 @@ test("relay refuses oversized payloads and stale board requests", async () => {
       range: 3600,
     }),
   ).toThrow();
+});
+test("Volán stop boards and trips pass, other operators' IDs do not", () => {
+  const start = Math.floor(Date.now() / 1000);
+  expect(() =>
+    validateOperation(EMMA_QUERIES.board, { id: "hkir:hkir_669106_2", start, range: 7200 }),
+  ).not.toThrow();
+  expect(() => validateOperation(EMMA_QUERIES.trip, { id: "hkir:hkir_8464_328-3" })).not.toThrow();
+  expect(() => validateOperation(EMMA_QUERIES.trip, { id: "BKK:F00057" })).toThrow();
 });

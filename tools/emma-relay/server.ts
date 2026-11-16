@@ -24,6 +24,8 @@ const TTL: Record<EmmaOperation, number> = {
   search: 30_000,
   board: 10_000,
   trip: 30_000,
+  plan: 15_000,
+  planWalkAverse: 15_000,
 };
 const MAX_BODY = 16_384,
   MAX_REPLY = 2_000_000;
@@ -48,7 +50,9 @@ export function validateOperation(
         ? ["name"]
         : operation === "board"
           ? ["id", "range", "start"]
-          : ["id"];
+          : operation === "plan" || operation === "planWalkAverse"
+            ? ["date", "from", "time", "to"]
+            : ["id"];
   if (Object.keys(variables).sort().join(",") !== expected.join(","))
     throw new Error("Invalid variables");
   if (operation === "vehicles" || operation === "stops") {
@@ -82,12 +86,37 @@ export function validateOperation(
       variables.name.length > 100)
   )
     throw new Error("Invalid search text");
+  if (operation === "plan" || operation === "planWalkAverse") {
+    // Coordinates only (no place names), inside Hungary; a local date and time near today.
+    for (const field of ["from", "to"] as const) {
+      const match =
+        typeof variables[field] === "string"
+          ? /^(-?\d{1,2}(?:\.\d{1,8})?),(-?\d{1,3}(?:\.\d{1,8})?)$/.exec(variables[field])
+          : null;
+      const lat = Number(match?.[1]),
+        lon = Number(match?.[2]);
+      if (!match || lat < 45.5 || lat > 48.8 || lon < 15.9 || lon > 23.1)
+        throw new Error("Planner endpoints must be coordinates in Hungary");
+    }
+    const date = typeof variables.date === "string" ? Date.parse(`${variables.date}T12:00:00Z`) : NaN;
+    if (
+      typeof variables.date !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(variables.date) ||
+      !Number.isFinite(date) ||
+      date < Date.now() - 2 * 86_400_000 ||
+      date > Date.now() + 62 * 86_400_000 ||
+      typeof variables.time !== "string" ||
+      !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(variables.time)
+    )
+      throw new Error("Invalid planner date or time");
+  }
   if (operation === "board" || operation === "trip") {
     if (
       typeof variables.id !== "string" ||
-      !/^1:[A-Za-z0-9_.:-]{1,160}$/.test(variables.id)
+      !/^(?:1|hkir):[A-Za-z0-9_.:-]{1,160}$/.test(variables.id)
     )
-      throw new Error("Only explicit MÁV identities are supported");
+      // MÁV (`1:`) and Volán (`hkir:`) identities: FUTÁR lacks rural Volán timetables, as on Android.
+      throw new Error("Only explicit MÁV or Volán identities are supported");
   }
   if (operation === "board") {
     if (

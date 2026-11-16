@@ -138,37 +138,52 @@ export function PlannerScreen({
     at: Date;
     id: number;
   } | null>(null);
-  const [selectedItinerary, setSelectedItinerary] = useState(0);
+  // PlannerScreen.kt: the results are their own screen (inResultsView), a chosen journey another.
+  const [resultsView, setResultsView] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
   const result = useRemote(
     planRequest ? `plan:${planRequest.id}` : "",
-    (signal) =>
-      planTrip(planRequest!.from, planRequest!.to, planRequest!.at, signal),
+    async (signal) => {
+      const outcome = await planJourney(planRequest!.from, planRequest!.to, planRequest!.at, signal);
+      return { value: outcome, at: outcome.requestedAt, incomplete: outcome.partial, fallbackUnavailable: false };
+    },
     { active: active && !editing, once: true },
   );
-  useEffect(() => {
-    setPlanRequest(null);
-    setSelectedItinerary(0);
-  }, [origin, destination, useLocation, departure]);
-  const itinerary = result.data?.value[selectedItinerary];
-  const planLines = useMemo(
-    () =>
-      itinerary?.legs.map((leg) => ({
-        coordinates: leg.geometry,
-        color: leg.mode === "WALK" ? "#536171" : leg.color,
-        walking: leg.mode === "WALK",
-      })) ?? [],
-    [itinerary],
-  );
-  const find = () => {
-    if (effectiveOrigin && destination) {
-      setSelectedItinerary(0);
-      setPlanRequest({
-        from: effectiveOrigin,
-        to: destination,
-        at: departure ?? new Date(),
-        id: Date.now(),
-      });
+  const now = useClock();
+  useBackLayer(selectedId != null, () => setSelectedId(null));
+  useBackLayer(resultsView && selectedId == null, () => setResultsView(false));
+  const outcome = result.data?.value;
+  const find = (at: Date | null = departure) => {
+    setPlanError(null);
+    if (!effectiveOrigin) {
+      if (useLocation) {
+        location.request();
+        setPlanError("A helyzeted még nem érhető el. Engedélyezd a helyhozzáférést, vagy válassz kiindulópontot.");
+        setResultsView(true);
+      }
+      return;
     }
+    if (!destination) return;
+    if (distanceMeters(effectiveOrigin.position, destination.position) < 50) {
+      setPlanError("Válassz a kiindulóponttól távolabbi célt.");
+      setResultsView(true);
+      return;
+    }
+    if (at && at.getTime() < Date.now() - 60_000) {
+      setPlanError("A megadott indulási idő elmúlt. Válassz későbbi időpontot, vagy indulj most.");
+      setResultsView(true);
+      return;
+    }
+    setSelectedId(null);
+    setResultsView(true);
+    setPlanRequest({ from: effectiveOrigin, to: destination, at: at ?? new Date(), id: Date.now() });
+  };
+  const shift = (minutes: number) => {
+    const base = departure ?? new Date(outcome?.readyAt ?? Date.now());
+    const next = new Date(base.getTime() + minutes * 60_000);
+    setDeparture(next);
+    find(next);
   };
 
   if (editing) {

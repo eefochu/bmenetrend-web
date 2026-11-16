@@ -27,7 +27,64 @@ export const EMMA_URL = endpoint();
 const cache = new Map<string, { data: Row; at: number; expires: number }>();
 let blockedUntil = 0;
 
-/** Official MÁV data via the configured adapter, or direct only where upstream CORS permits. */
+async function emmaFetch(query: string, variables: Row, ttl: number, signal: AbortSignal) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  signal.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(cancel, 8000);
+  try {
+    const response = await fetch(EMMA_URL, {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables }),
+      signal: controller.signal,
+    });
+    if (response.status === 429) {
+      // Only an explicit rate limit pauses every MÁV request.
+      const retry = Number(response.headers.get("Retry-After"));
+      blockedUntil = Date.now() + (retry > 0 ? Math.min(retry, 120) * 1000 : 30_000);
+      throw new EmmaError(`Az EMMA nem érhető el (429).`, false);
+    }
+    if (!response.ok)
+      // A rejected or failed request is about this request only; 5xx may succeed on a retry.
+      throw new EmmaError(`Az EMMA nem érhető el (${response.status}).`, response.status >= 500);
+    const json = object(await response.json());
+    if (array(json.errors).length || !json.data)
+      throw new EmmaError("Az EMMA nem tudta teljesíteni a kérést.", false);
+    return { data: object(json.data), at: Date.now(), expires: Date.now() + ttl };
+  } catch (error) {
+    if (signal.aborted) throw new DOMException("Megszakítva", "AbortError");
+    if (error instanceof EmmaError) throw error;
+    if (controller.signal.aborted)
+      throw new EmmaError("Az EMMA nem válaszolt időben.", true);
+    // TypeError: the adapter is not running or CORS refused the response; retrying each tick cannot help.
+    blockedUntil = Date.now() + 30_000;
+    throw new EmmaError(
+      "A MÁV/EMMA adatai ebben a böngészőben nem érhetők el. Próbáld később.",
+      false,
+    );
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
+class EmmaError extends Error {
+  constructor(
+    message: string,
+    public transient: boolean,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Official MÁV data via the configured adapter, or direct only where upstream CORS permits. A timeout or
+ * 5xx is retried once after a short pause; only an unreachable adapter or an explicit 429 pauses MÁV
+ * requests globally.
+ */
 export async function emmaQuery(
   query: string,
   variables: Row,
@@ -42,50 +99,18 @@ export async function emmaQuery(
     throw new Error(
       "A MÁV/EMMA adatai ebben a böngészőben nem érhetők el. A BKK adatai továbbra is használhatók.",
     );
-  const controller = new AbortController();
-  const cancel = () => controller.abort();
-  signal.addEventListener("abort", cancel, { once: true });
-  const timer = setTimeout(cancel, 8000);
+  let result;
   try {
-    const response = await fetch(EMMA_URL, {
-      method: "POST",
-      mode: "cors",
-      credentials: "omit",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const retry = Number(response.headers.get("Retry-After"));
-      blockedUntil =
-        Date.now() +
-        (response.status === 429 && retry > 0 ? retry * 1000 : 60_000);
-      throw new Error(`Az EMMA nem érhető el (${response.status}).`);
-    }
-    const json = object(await response.json());
-    if (array(json.errors).length || !json.data)
-      throw new Error("Az EMMA nem tudta teljesíteni a kérést.");
-    const result = {
-      data: object(json.data),
-      at: Date.now(),
-      expires: Date.now() + ttl,
-    };
-    cache.set(key, result);
-    while (cache.size > 30) cache.delete(cache.keys().next().value!);
-    return result;
+    result = await emmaFetch(query, variables, ttl, signal);
   } catch (error) {
+    if (!(error instanceof EmmaError) || !error.transient || signal.aborted) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 600));
     if (signal.aborted) throw new DOMException("Megszakítva", "AbortError");
-    if (error instanceof TypeError || controller.signal.aborted) {
-      blockedUntil = Date.now() + 60_000;
-      throw new Error(
-        "A MÁV/EMMA adatai ebben a böngészőben nem érhetők el. Próbáld később.",
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", cancel);
+    result = await emmaFetch(query, variables, ttl, signal);
   }
+  cache.set(key, result);
+  while (cache.size > 30) cache.delete(cache.keys().next().value!);
+  return result;
 }
 function snapshot<T>(value: T, at: number): Snapshot<T> {
   return {
@@ -136,16 +161,25 @@ function route(value: unknown): Route | null {
       }
     : null;
 }
-function stop(value: unknown): Stop | null {
+const VOLAN_STOP = /^hkir:hkir_(\d+_\d+)$/;
+/** An app stop/trip identity that EMMA serves for Volán (`emma:hkir:…`), shared with the Worker's `volan_…`. */
+export const isVolanId = (id: string) => id.startsWith("emma:hkir:");
+
+/**
+ * MÁV railway stops for the map supplement. Stops of a Volán trip (`volan`) are accepted too, with the
+ * Worker identity as rawId, so a tapped stop keeps the BKK-first board path.
+ */
+function stop(value: unknown, volan = false): Stop | null {
   const row = object(value),
     point = position(row),
     id = string(row.gtfsId);
   if (!point || !id || !string(row.name)) return null;
+  const volanCode = volan ? VOLAN_STOP.exec(id)?.[1] : undefined;
   // MÁV supplement only; BKK platforms and other operators stay on the primary Worker path.
-  if (!id.startsWith("1:") || !isRail(string(row.vehicleMode))) return null;
+  if (!volanCode && (!id.startsWith("1:") || !isRail(string(row.vehicleMode)))) return null;
   return {
     id: `emma:${id}`,
-    rawId: `emma:${id}`,
+    rawId: volanCode ? `volan_${volanCode}` : `emma:${id}`,
     name: string(row.name),
     position: point,
     platform: string(row.platformCode),
@@ -157,24 +191,31 @@ function stop(value: unknown): Stop | null {
     source: "EMMA",
   };
 }
-function bounds(point: GeoPoint, radius: number) {
-  const lat = Math.min(radius, 5000) / 111_000,
-    lon = lat / Math.cos((point.lat * Math.PI) / 180);
+/**
+ * The map area as a railway query box. Box centres snap to a coarse 0.028° × 0.05° grid and always span
+ * the full 5 km radius plus half a cell, so panning within a few kilometres repeats an identical (cached)
+ * query instead of a new MÁV request for every small move. The box stays within the adapter's limits
+ * (0.12° × 0.2°, Hungary bounds); the map radius is never more than 5 km.
+ */
+function bounds(point: GeoPoint) {
+  const cellLat = 0.028,
+    cellLon = 0.05;
+  const lat = Math.round(point.lat / cellLat) * cellLat,
+    lon = Math.round(point.lon / cellLon) * cellLon;
+  const halfLat = 5000 / 111_000 + cellLat / 2, // 0.059°: under the 0.12° span limit after rounding
+    halfLon = Math.min(0.0995, 5000 / 111_000 / Math.cos((lat * Math.PI) / 180) + cellLon / 2);
+  const round = (value: number) => Math.round(value * 1e5) / 1e5;
   return {
-    south: point.lat - lat,
-    north: point.lat + lat,
-    west: point.lon - lon,
-    east: point.lon + lon,
+    south: round(Math.max(45.5, lat - halfLat)),
+    north: round(Math.min(48.8, lat + halfLat)),
+    west: round(Math.max(15.9, lon - halfLon)),
+    east: round(Math.min(23.1, lon + halfLon)),
   };
 }
-export async function emmaStops(
-  point: GeoPoint,
-  radius: number,
-  signal: AbortSignal,
-) {
+export async function emmaStops(point: GeoPoint, signal: AbortSignal) {
   const result = await emmaQuery(
     EMMA_QUERIES.stops,
-    bounds(point, radius),
+    bounds(point),
     300_000,
     signal,
   );
@@ -186,14 +227,10 @@ export async function emmaStops(
     result.at,
   );
 }
-export async function emmaVehicles(
-  point: GeoPoint,
-  radius: number,
-  signal: AbortSignal,
-) {
+export async function emmaVehicles(point: GeoPoint, signal: AbortSignal) {
   const result = await emmaQuery(
     EMMA_QUERIES.vehicles,
-    bounds(point, radius),
+    bounds(point),
     10_000,
     signal,
   );
@@ -260,6 +297,7 @@ export async function emmaBoard(
   minutes: number,
   signal: AbortSignal,
 ) {
+  const volan = isVolanId(target.id);
   const result = await emmaQuery(
     EMMA_QUERIES.board,
     {
@@ -278,7 +316,8 @@ export async function emmaBoard(
         scheduled =
           (number(row.serviceDay) + number(row.scheduledDeparture)) * 1000,
         cancelled = row.realtimeState === "CANCELED";
-      if (!parsed || !isRail(parsed.mode) || !number(row.serviceDay)) return [];
+      // A MÁV station lists trains only; a Volán stop (FUTÁR fallback) lists its coaches.
+      if (!parsed || (!volan && !isRail(parsed.mode)) || !number(row.serviceDay)) return [];
       const live = !cancelled && row.realtime === true;
       return [
         {
@@ -306,14 +345,15 @@ export async function emmaBoard(
 }
 export async function emmaTrip(tripId: string, signal: AbortSignal) {
   const id = tripId.slice(5);
+  const volan = isVolanId(tripId);
   const result = await emmaQuery(EMMA_QUERIES.trip, { id }, 30_000, signal);
   const trip = object(result.data.trip),
     parsed = route(trip.route),
     times = array(trip.stoptimes);
-  if (trip.gtfsId !== id || !parsed || !isRail(parsed.mode))
-    throw new Error("A MÁV-járat nem található.");
+  if (trip.gtfsId !== id || !parsed || (!volan && !isRail(parsed.mode)))
+    throw new Error(volan ? "A Volán-járat nem található." : "A MÁV-járat nem található.");
   const stops = array(trip.stops).flatMap((value, index) => {
-    const parsed = stop(value),
+    const parsed = stop(value, volan),
       time = object(times[index]),
       seconds =
         time.realtime === true

@@ -23,6 +23,7 @@ import {
 } from "../src/lib/transit/client";
 import {
   emmaQuery,
+  emmaVehicles,
   mergeStops,
   mergeVehicles,
   EMMA_URL,
@@ -472,6 +473,115 @@ describe("official MÁV GraphQL fallback", () => {
     expect(String(mocked.mock.calls[0]?.[0])).toBe(EMMA_URL);
     expect(mocked.mock.calls[0]?.[1]?.mode).toBe("cors");
     expect(mocked.mock.calls[0]?.[1]?.credentials).toBe("omit");
+  });
+  test("an empty FUTÁR board for a rural Volán stop falls back to EMMA coaches", async () => {
+    const day = Math.floor(Date.now() / 1000);
+    const volan: Stop = {
+      ...stop,
+      id: "emma:hkir:hkir_669106_2",
+      rawId: "volan_669106_2",
+      name: "Császár, posta",
+      mode: "BUS",
+    };
+    const mocked = fetchMock(async (input) =>
+      String(input).includes("workers.dev")
+        ? reply({ references: refs, entry: { stopId: volan.rawId, stopTimes: [] } })
+        : Response.json({
+            data: {
+              stop: {
+                stoptimesWithoutPatterns: [
+                  {
+                    serviceDay: day,
+                    scheduledDeparture: 600,
+                    realtimeDeparture: 600,
+                    realtime: false,
+                    headsign: "Kisbér",
+                    trip: {
+                      gtfsId: "hkir:hkir_8464_328-3",
+                      route: { gtfsId: "hkir:hkir_V-R-200-8464", shortName: "8464", mode: "COACH" },
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+    );
+    // Past the shared Worker cooldown an earlier 429 test leaves behind, so FUTÁR really answers empty.
+    const clock = spyOn(Date, "now").mockReturnValue(Date.now() + 120_000);
+    let result;
+    try {
+      result = await board(volan, 60, signal());
+    } finally {
+      clock.mockRestore();
+    }
+    expect(String(mocked.mock.calls[0]?.[0])).toContain("stopId=volan_669106_2");
+    const emmaCall = mocked.mock.calls[1];
+    expect(
+      (JSON.parse(String(emmaCall?.[1]?.body)) as { variables: { id: string } }).variables.id,
+    ).toBe("hkir:hkir_669106_2");
+    expect(result.value).toHaveLength(1);
+    expect(result.value[0]?.route.name).toBe("8464");
+    expect(result.value[0]?.tripId).toBe("emma:hkir:hkir_8464_328-3");
+  });
+  test("an empty FUTÁR board for a rural railway station falls back to EMMA trains", async () => {
+    const day = Math.floor(Date.now() / 1000);
+    const station: Stop = {
+      ...stop,
+      id: "emma:1:005503418_0",
+      rawId: "BKK_005503418_0",
+      name: "Balatonföldvár",
+      mode: "RAIL",
+    };
+    const mocked = fetchMock(async (input) =>
+      String(input).includes("workers.dev")
+        ? reply({ references: refs, entry: { stopId: station.rawId, stopTimes: [] } })
+        : Response.json({
+            data: {
+              stop: {
+                stoptimesWithoutPatterns: [
+                  {
+                    serviceDay: day,
+                    scheduledDeparture: 900,
+                    realtimeDeparture: 960,
+                    realtime: true,
+                    headsign: "Keszthely",
+                    trip: {
+                      gtfsId: "1:balaton-trip",
+                      route: { gtfsId: "1:V1", shortName: "", longName: "Z76", mode: "RAIL" },
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+    );
+    const clock = spyOn(Date, "now").mockReturnValue(Date.now() + 120_000);
+    let result;
+    try {
+      result = await board(station, 60, signal());
+    } finally {
+      clock.mockRestore();
+    }
+    expect(String(mocked.mock.calls[0]?.[0])).toContain("stopId=BKK_005503418_0");
+    expect(result.value).toHaveLength(1);
+    expect(result.value[0]?.route.name).toBe("Z76");
+    expect(result.value[0]?.live).toBe(true);
+  });
+  test("small pans reuse one bounded railway area query", async () => {
+    const mocked = fetchMock(async () => Response.json({ data: { vehiclePositions: [] } }));
+    await emmaVehicles({ lat: 47.381, lon: 19.141 }, signal());
+    await emmaVehicles({ lat: 47.386, lon: 19.149 }, signal());
+    expect(mocked).toHaveBeenCalledTimes(1);
+    const box = (
+      JSON.parse(String(mocked.mock.calls[0]?.[1]?.body)) as {
+        variables: { south: number; north: number; west: number; east: number };
+      }
+    ).variables;
+    // Within the adapter's 0.12° × 0.2° limit, still covering 5 km around either centre.
+    expect(box.north - box.south).toBeLessThanOrEqual(0.12);
+    expect(box.east - box.west).toBeLessThanOrEqual(0.2);
+    expect(box.south).toBeLessThan(47.381 - 0.045);
+    expect(box.north).toBeGreaterThan(47.386 + 0.045);
   });
   test("browser CORS/network failures back off instead of retrying each live tick", async () => {
     // Keep the cooldown in the past after restoring the clock, so other test
