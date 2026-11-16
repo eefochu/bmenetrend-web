@@ -1,6 +1,7 @@
 import Router from "next/router";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { Stop } from "~/lib/transit/model";
 import { Icon } from "~/components/ui";
 import { PreferencesProvider } from "~/lib/preferences";
 import { t } from "~/lib/strings";
@@ -32,6 +33,7 @@ export default function AppShell() {
  * state while another tab is shown, like rememberSaveableStateHolder; back from another tab returns to the map.
  */
 function MainNavigation() {
+  const [requestedStop, setRequestedStop] = useState<Stop | null>(null);
   const [tab, setTab] = useState<Tab>("map");
   const [visited, setVisited] = useState<Set<Tab>>(() => new Set(["map"]));
   const [mapFullscreen, setMapFullscreen] = useState(false);
@@ -50,7 +52,9 @@ function MainNavigation() {
     setSettingsOpen(false);
     setAboutOpen(false);
     setTab(next);
-    setVisited((current) => (current.has(next) ? current : new Set(current).add(next)));
+    setVisited((current) =>
+      current.has(next) ? current : new Set(current).add(next),
+    );
   }, []);
   useBackLayer(tab !== "map", () => setTab("map"));
   useBackLayer(settingsOpen, () => setSettingsOpen(false));
@@ -60,7 +64,10 @@ function MainNavigation() {
   const hideNavigation = tab === "map" && mapFullscreen && !settingsOpen;
   const items = useRef<(HTMLButtonElement | null)[]>([]);
   const navigation = (kind: "rail" | "bar") => (
-    <nav className={kind === "rail" ? "nav-rail" : "nav-bar"} aria-label="Fő navigáció">
+    <nav
+      className={kind === "rail" ? "nav-rail" : "nav-bar"}
+      aria-label="Fő navigáció"
+    >
       <div
         role="tablist"
         aria-orientation={kind === "rail" ? "vertical" : "horizontal"}
@@ -71,7 +78,9 @@ function MainNavigation() {
           if (event.key !== forward && event.key !== backward) return;
           event.preventDefault();
           const index = TABS.findIndex((item) => item.tab === tab);
-          const next = (index + (event.key === forward ? 1 : -1) + TABS.length) % TABS.length;
+          const next =
+            (index + (event.key === forward ? 1 : -1) + TABS.length) %
+            TABS.length;
           select(TABS[next]!.tab);
           items.current[next]?.focus();
         }}
@@ -89,7 +98,7 @@ function MainNavigation() {
               aria-selected={selected}
               aria-controls={`screen-${item.tab}`}
               tabIndex={selected ? 0 : -1}
-              className={`nav-item${selected ? " nav-selected" : ""}`}
+              className={`nav-item ${selected ? "nav-selected" : ""}`}
               onClick={() => select(item.tab)}
             >
               <span className="nav-indicator">
@@ -104,7 +113,7 @@ function MainNavigation() {
         // Desktop: Settings sits at the bottom of the rail; on phones it stays in the search bar.
         <button
           type="button"
-          className={`nav-item nav-settings${settingsOpen ? " nav-selected" : ""}`}
+          className={`nav-item nav-settings ${settingsOpen ? "nav-selected" : ""}`}
           aria-pressed={settingsOpen}
           onClick={() => {
             setAboutOpen(false);
@@ -121,27 +130,56 @@ function MainNavigation() {
   );
 
   return (
-    <div className={`app-shell${hideNavigation ? " nav-hidden" : ""}${settingsOpen ? " settings-open" : ""}`}>
+    <div
+      className={`app-shell ${hideNavigation ? "nav-hidden" : ""} ${settingsOpen ? "settings-open" : ""}`}
+    >
       {navigation("rail")}
       <div className="app-content">
         <main className="app-screens">
-          <section id="screen-map" role="tabpanel" aria-label={t.navMap} className="screen" hidden={tab !== "map"}>
+          <section
+            id="screen-map"
+            role="tabpanel"
+            aria-label={t.navMap}
+            className="screen"
+            hidden={tab !== "map"}
+          >
             <MapScreen
+              requestedStop={requestedStop}
               location={location}
-              active={tab === "map"}
+              active={tab === "map" && !settingsOpen && !aboutOpen}
               openSearchRequest={searchRequest}
               onFullscreenChanged={setMapFullscreen}
               onOpenSettings={openSettings}
             />
           </section>
           {visited.has("planner") && (
-            <section id="screen-planner" role="tabpanel" aria-label={t.navPlan} className="screen" hidden={tab !== "planner"}>
-              <PlannerScreen location={location} />
+            <section
+              id="screen-planner"
+              role="tabpanel"
+              aria-label={t.navPlan}
+              className="screen"
+              hidden={tab !== "planner"}
+            >
+              <PlannerScreen
+                location={location}
+                active={tab === "planner" && !settingsOpen && !aboutOpen}
+              />
             </section>
           )}
           {visited.has("favorites") && (
-            <section id="screen-favorites" role="tabpanel" aria-label={t.navFavorites} className="screen screen-content-width" hidden={tab !== "favorites"}>
+            <section
+              id="screen-favorites"
+              role="tabpanel"
+              aria-label={t.navFavorites}
+              className="screen screen-content-width"
+              hidden={tab !== "favorites"}
+            >
               <FavoritesScreen
+                active={tab === "favorites"}
+                onStop={(stop) => {
+                  select("map");
+                  setRequestedStop({ ...stop });
+                }}
                 onBrowse={() => {
                   select("map");
                   setSearchRequest((value) => value + 1);
@@ -149,7 +187,12 @@ function MainNavigation() {
               />
             </section>
           )}
-          {settingsOpen && <SettingsPage onBack={() => setSettingsOpen(false)} onAbout={() => setAboutOpen(true)} />}
+          {settingsOpen && (
+            <SettingsPage
+              onBack={() => setSettingsOpen(false)}
+              onAbout={() => setAboutOpen(true)}
+            />
+          )}
           {aboutOpen && <AboutPage onBack={() => setAboutOpen(false)} />}
         </main>
         {navigation("bar")}

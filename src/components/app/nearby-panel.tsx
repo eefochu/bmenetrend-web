@@ -1,28 +1,54 @@
-import { ConnectedSelector, Icon, RefreshBar, ShapeIconTile } from "~/components/ui";
-import { compactDuration, DEPARTURE_WINDOWS, usePreferences } from "~/lib/preferences";
+import type { ReactNode } from "react";
+import type { Departure, Stop } from "~/lib/transit/model";
+import { CookieIconButton, Icon, RefreshBar, SegmentedItem, ShapeIconTile } from "~/components/ui";
+import { DepartureWindowSelector } from "./departure-window-selector";
+import { DepartureBoardRow } from "./departure-card";
+import { DistancePill } from "./search-components";
+import { PlatformBadge } from "./transit-components";
+import { formatDistance } from "~/lib/transit/labels";
 import { t } from "~/lib/strings";
-import type { UserLocation } from "~/lib/use-user-location";
+
+export type NearbyStation = {
+  stop: Stop;
+  distance: number;
+  /** Undefined while the station's board is loading. */
+  departures?: Departure[];
+  unavailable?: boolean;
+};
 
 type NearbyPanelProps = {
+  loading: boolean;
+  stations: NearbyStation[];
+  now: number;
+  atUser: boolean;
+  /** Android's stopStatus: why there is nothing to show yet (zoom, network, location). */
+  status?: string | null;
+  notice?: ReactNode;
   expanded: boolean;
-  location: UserLocation;
+  onStop: (stop: Stop) => void;
+  onDeparture: (departure: Departure, stop: Stop) => void;
+  onRefresh: () => void;
   onToggleExpand: () => void;
   onCollapse: () => void;
   onSearch: () => void;
 };
 
-/**
- * Port of ui/NearbyPanel.kt. The station list arrives with the departures port; until then the panel
- * shows Android's status slot (stopStatus) instead of an "empty area" claim.
- */
-export function NearbyPanel({ expanded, location, onToggleExpand, onCollapse, onSearch }: NearbyPanelProps) {
-  const { windowMinutes, update } = usePreferences();
-  const notice =
-    location.status === "denied" || location.status === "unavailable"
-      ? t.locationDenied
-      : location.status === "locating"
-        ? t.locating
-        : null;
+/** ui/NearbyPanel.kt: each nearby station is one boxed group, its header then its next three departures. */
+export function NearbyPanel({
+  stations,
+  loading,
+  now,
+  atUser,
+  status,
+  notice,
+  expanded,
+  onStop,
+  onDeparture,
+  onRefresh,
+  onToggleExpand,
+  onCollapse,
+  onSearch,
+}: NearbyPanelProps) {
   return (
     <div className="panel-scroll">
       <div className="nearby-header" data-sheet-drag>
@@ -31,11 +57,24 @@ export function NearbyPanel({ expanded, location, onToggleExpand, onCollapse, on
             {expanded ? (
               t.nearbyTitle
             ) : (
-              <button type="button" className="title-button" onClick={onToggleExpand} aria-label={`${t.nearbyTitle} – ${t.expandDepartures}`}>
+              <button
+                type="button"
+                className="title-button"
+                onClick={onToggleExpand}
+                aria-label={`${t.nearbyTitle} – ${t.expandDepartures}`}
+              >
                 {t.nearbyTitle}
               </button>
             )}
           </h2>
+          <CookieIconButton
+            label="Indulások frissítése"
+            size={52}
+            disabled={loading}
+            onClick={onRefresh}
+          >
+            <Icon name="refresh" className={loading ? "spinning" : ""} />
+          </CookieIconButton>
           <button
             type="button"
             className="icon-button"
@@ -46,29 +85,73 @@ export function NearbyPanel({ expanded, location, onToggleExpand, onCollapse, on
             <Icon name="keyboard_arrow_down" />
           </button>
         </div>
-        <p className="t-body-small on-variant">{location.position ? t.nearbyYou : t.nearbyMap}</p>
-        <ConnectedSelector
-          options={DEPARTURE_WINDOWS}
-          selected={windowMinutes as (typeof DEPARTURE_WINDOWS)[number]}
-          onSelect={(value) => update({ windowMinutes: value })}
-          label={t.departures}
-          text={compactDuration}
-        />
+        <p className="t-body-small on-variant">{atUser ? t.nearbyYou : t.nearbyMap}</p>
+        <DepartureWindowSelector />
       </div>
-      <RefreshBar visible={false} inset={22} />
-      {notice && (
-        <div className="notice">
-          <Icon name="my_location" size={17} />
-          <p className="t-body-small">{notice}</p>
+      <div className="nearby-refresh">
+        <RefreshBar visible={loading && stations.length > 0} />
+      </div>
+      {notice}
+      {stations.length === 0 && loading && (
+        <div className="panel-loading">
+          <RefreshBar visible />
         </div>
       )}
-      <div className="nearby-empty">
-        <ShapeIconTile icon="near_me" shape="cookie7" />
-        <p className="t-body-medium on-variant centered">{t.webNearbyPending}</p>
-        <button type="button" className="button button-outlined button-block" onClick={onSearch}>
-          <Icon name="search" size={20} />
-          {t.findStop}
-        </button>
+      {stations.length === 0 && !loading && (
+        <div className="nearby-empty">
+          <ShapeIconTile icon="near_me" shape="cookie7" />
+          <p className="t-body-medium on-variant centered">
+            {status ??
+              "Ezen a környéken most nincs megjeleníthető indulás. Keress megállóra, vagy mozdítsd el a térképet."}
+          </p>
+          <button type="button" className="button button-outlined button-block" onClick={onSearch}>
+            <Icon name="search" size={20} />
+            {t.findStop}
+          </button>
+        </div>
+      )}
+      <div className="nearby-groups">
+        {stations.map((station) => {
+          const shown = station.departures?.slice(0, 3) ?? [];
+          const count = 1 + shown.length;
+          return (
+            <section key={station.stop.id} className="nearby-station" aria-label={station.stop.name}>
+              <SegmentedItem
+                index={0}
+                count={count}
+                color="surface-container-high"
+                onClick={() => onStop(station.stop)}
+              >
+                <span className="nearby-station-header">
+                  <span className="nearby-station-title">
+                    <span className="t-title-medium clamp-2">{station.stop.name}</span>
+                    <PlatformBadge code={station.stop.platform} />
+                    <span className="spacer" />
+                    <DistancePill text={formatDistance(station.distance)} />
+                    <Icon name="chevron_right" size={20} className="on-variant" />
+                  </span>
+                  {station.departures?.length === 0 && (
+                    <span className="t-body-small on-variant">
+                      {station.unavailable
+                        ? "Az indulások nem érhetők el. Automatikusan újrapróbáljuk."
+                        : "Ebben az időszakban nincs indulás."}
+                    </span>
+                  )}
+                </span>
+              </SegmentedItem>
+              {shown.map((departure, index) => (
+                <SegmentedItem
+                  key={departure.id}
+                  index={index + 1}
+                  count={count}
+                  onClick={departure.cancelled ? undefined : () => onDeparture(departure, station.stop)}
+                >
+                  <DepartureBoardRow departure={departure} now={now} clickable={false} />
+                </SegmentedItem>
+              ))}
+            </section>
+          );
+        })}
       </div>
     </div>
   );

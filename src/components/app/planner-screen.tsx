@@ -1,18 +1,41 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Checkbox, Radio } from "~/components/material";
 import TransitMap from "~/components/map/transit-map";
-import { CookieIconButton, Dialog, EmptyState, Icon, RefreshBar, ShapeIconTile } from "~/components/ui";
+import {
+  CookieIconButton,
+  Dialog,
+  EmptyState,
+  Icon,
+  RefreshBar,
+  ShapeIconTile,
+} from "~/components/ui";
 import { mapStyleUrl } from "~/lib/map-config";
 import { distanceMeters, formatDistance, type GeoPoint } from "~/lib/places";
 import { LOCAL_PROVIDERS, usePreferences } from "~/lib/preferences";
+import { planTrip, searchTransit } from "~/lib/transit/client";
+import { useRemote } from "~/lib/transit/hooks";
+import { clock, type Itinerary } from "~/lib/transit/model";
+import { DataStatus, StopRow, RouteBadge } from "./transit-components";
 import { t } from "~/lib/strings";
 import { useBackLayer } from "~/lib/use-back-layer";
 import type { UserLocation } from "~/lib/use-user-location";
 import { MapAttribution } from "./map-attribution";
-import { DistancePill, ExampleChips, SearchGroupTitle, SearchResultCard, TransitSearchInput, usePlaceSearch } from "./search-components";
+import {
+  DistancePill,
+  ExampleChips,
+  SearchGroupTitle,
+  SearchResultCard,
+  TransitSearchInput,
+  usePlaceSearch,
+} from "./search-components";
 
-type Endpoint = { id: string; name: string; detail: string; position: GeoPoint };
+type Endpoint = {
+  id: string;
+  name: string;
+  detail: string;
+  position: GeoPoint;
+};
 type Field = "origin" | "destination";
 
 const ZONE = "Europe/Budapest";
@@ -23,31 +46,72 @@ function budapestInstant(date: string, time: string): Date | null {
   const [h, mi] = time.split(":").map(Number);
   if (!y || !m || !d || h == null || mi == null) return null;
   const naive = Date.UTC(y, m - 1, d, h, mi);
-  const format = new Intl.DateTimeFormat("en-US", { timeZone: ZONE, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const format = new Intl.DateTimeFormat("en-US", {
+    timeZone: ZONE,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
   const matches = [60, 120]
     .map((offset) => naive - offset * 60_000)
     .filter((ms) => {
-      const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map((part) => [part.type, part.value]));
-      return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute)) === naive;
+      const parts = Object.fromEntries(
+        format
+          .formatToParts(new Date(ms))
+          .map((part) => [part.type, part.value]),
+      );
+      return (
+        Date.UTC(
+          Number(parts.year),
+          Number(parts.month) - 1,
+          Number(parts.day),
+          Number(parts.hour),
+          Number(parts.minute),
+        ) === naive
+      );
     });
   return matches.length === 1 ? new Date(matches[0]!) : null;
 }
 
 function budapestParts(at: Date) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", { timeZone: ZONE, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: ZONE,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })
       .formatToParts(at)
       .map((part) => [part.type, part.value]),
   );
-  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+  };
 }
 
 function departureLabel(at: Date) {
-  return new Intl.DateTimeFormat("hu-HU", { timeZone: ZONE, dateStyle: "medium", timeStyle: "short" }).format(at);
+  return new Intl.DateTimeFormat("hu-HU", {
+    timeZone: ZONE,
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(at);
 }
 
 /** Port of ui/PlannerScreen.kt (PlannerMapOverlay and PlannerSearch). Itineraries come with the EMMA planner port. */
-export function PlannerScreen({ location }: { location: UserLocation }) {
+export function PlannerScreen({
+  location,
+  active = true,
+}: {
+  location: UserLocation;
+  active?: boolean;
+}) {
   const preferences = usePreferences();
   const [origin, setOrigin] = useState<Endpoint | null>(null);
   const [destination, setDestination] = useState<Endpoint | null>(null);
@@ -59,13 +123,58 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
   useBackLayer(editing != null, () => setEditing(null));
 
   const current: Endpoint | null = location.position
-    ? { id: "current", name: t.plannerCurrent, detail: "", position: location.position }
+    ? {
+        id: "current",
+        name: t.plannerCurrent,
+        detail: "",
+        position: location.position,
+      }
     : null;
   const effectiveOrigin = useLocation ? current : origin;
+
+  const [planRequest, setPlanRequest] = useState<{
+    from: Endpoint;
+    to: Endpoint;
+    at: Date;
+    id: number;
+  } | null>(null);
+  const [selectedItinerary, setSelectedItinerary] = useState(0);
+  const result = useRemote(
+    planRequest ? `plan:${planRequest.id}` : "",
+    (signal) =>
+      planTrip(planRequest!.from, planRequest!.to, planRequest!.at, signal),
+    { active: active && !editing, once: true },
+  );
+  useEffect(() => {
+    setPlanRequest(null);
+    setSelectedItinerary(0);
+  }, [origin, destination, useLocation, departure]);
+  const itinerary = result.data?.value[selectedItinerary];
+  const planLines = useMemo(
+    () =>
+      itinerary?.legs.map((leg) => ({
+        coordinates: leg.geometry,
+        color: leg.mode === "WALK" ? "#536171" : leg.color,
+        walking: leg.mode === "WALK",
+      })) ?? [],
+    [itinerary],
+  );
+  const find = () => {
+    if (effectiveOrigin && destination) {
+      setSelectedItinerary(0);
+      setPlanRequest({
+        from: effectiveOrigin,
+        to: destination,
+        at: departure ?? new Date(),
+        id: Date.now(),
+      });
+    }
+  };
 
   if (editing) {
     return (
       <PlannerSearch
+        active={active}
         field={editing}
         userPosition={location.position}
         onBack={() => setEditing(null)}
@@ -94,12 +203,18 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
 
   const findButton = (
     <div className="planner-find">
-      <button type="button" className="button button-filled button-block button-tall" disabled aria-describedby="planner-pending">
+      <button
+        type="button"
+        className="button button-filled button-block button-tall"
+        disabled={!effectiveOrigin || !destination || result.loading}
+        onClick={find}
+      >
         <Icon name="route" size={20} />
         {t.plannerFind}
       </button>
-      <p id="planner-pending" className="t-body-small on-variant">
-        {t.webPlannerPending}
+      <p className="t-body-small on-variant">
+        BKK API · A helyi ViaBusz, HOMM és KanyarGO menetrendek külön
+        integrációt igényelnek.
       </p>
     </div>
   );
@@ -107,44 +222,96 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
   return (
     <div className="planner">
       <div className="planner-layout">
-      <div className="planner-controls">
-        <div className="planner-title-row">
-          <h1 className="t-title-large">{t.plannerTitle}</h1>
-        </div>
-        <div className="endpoints">
-          <div className="endpoints-fields">
-            <EndpointField field="origin" endpoint={effectiveOrigin} current={useLocation} onClick={() => setEditing("origin")} />
-            <hr className="endpoint-divider" />
-            <EndpointField field="destination" endpoint={destination} current={false} onClick={() => setEditing("destination")} />
+        <div className="planner-controls">
+          <div className="planner-title-row">
+            <h1 className="t-title-large">{t.plannerTitle}</h1>
           </div>
-          <CookieIconButton label={t.plannerSwap} size={52} tone="high" onClick={swap} disabled={!effectiveOrigin && !destination}>
-            <Icon name="swap_vert" />
-          </CookieIconButton>
+          <div className="endpoints">
+            <div className="endpoints-fields">
+              <EndpointField
+                field="origin"
+                endpoint={effectiveOrigin}
+                current={useLocation}
+                onClick={() => setEditing("origin")}
+              />
+              <hr className="endpoint-divider" />
+              <EndpointField
+                field="destination"
+                endpoint={destination}
+                current={false}
+                onClick={() => setEditing("destination")}
+              />
+            </div>
+            <CookieIconButton
+              label={t.plannerSwap}
+              size={52}
+              tone="high"
+              onClick={swap}
+              disabled={!effectiveOrigin && !destination}
+            >
+              <Icon name="swap_vert" />
+            </CookieIconButton>
+          </div>
+          <div className="chip-row tight">
+            <button
+              type="button"
+              className="assist-chip"
+              onClick={() => setPickerOpen(true)}
+            >
+              <Icon name="schedule" size={18} />
+              {departure ? departureLabel(departure) : t.plannerLeaveNow}
+              <Icon name="expand_more" size={16} />
+            </button>
+            <button
+              type="button"
+              className="assist-chip"
+              onClick={() => setServicesOpen(true)}
+            >
+              <Icon name="tune" size={18} />
+              {t.plannerLocalServices}
+              <Icon name="expand_more" size={16} />
+            </button>
+          </div>
+          {destination && <div className="planner-find-wide">{findButton}</div>}
         </div>
-        <div className="chip-row tight">
-          <button type="button" className="assist-chip" onClick={() => setPickerOpen(true)}>
-            <Icon name="schedule" size={18} />
-            {departure ? departureLabel(departure) : t.plannerLeaveNow}
-            <Icon name="expand_more" size={16} />
-          </button>
-          <button type="button" className="assist-chip" onClick={() => setServicesOpen(true)}>
-            <Icon name="tune" size={18} />
-            {t.plannerLocalServices}
-            <Icon name="expand_more" size={16} />
-          </button>
+        <div className="planner-map">
+          <TransitMap
+            styleUrl={mapStyleUrl(preferences.dark)}
+            userPosition={location.position}
+            route={{
+              origin: effectiveOrigin?.position ?? null,
+              destination: destination?.position ?? null,
+            }}
+            routeColor={preferences.scheme.primary}
+            lines={planLines}
+          />
+          <MapAttribution className="planner-attribution" />
         </div>
-        {destination && <div className="planner-find-wide">{findButton}</div>}
-      </div>
-      <div className="planner-map">
-        <TransitMap
-          styleUrl={mapStyleUrl(preferences.dark)}
-          userPosition={location.position}
-          route={{ origin: effectiveOrigin?.position ?? null, destination: destination?.position ?? null }}
-          routeColor={preferences.scheme.primary}
-        />
-        <MapAttribution className="planner-attribution" />
-      </div>
-      {destination && <div className="planner-find-narrow">{findButton}</div>}
+        {destination && <div className="planner-find-narrow">{findButton}</div>}
+        {planRequest && (
+          <div className="journey-results">
+            <DataStatus
+              {...result.data}
+              loading={result.loading}
+              error={result.error}
+              retry={result.retry}
+            />
+            {result.data?.value.map((row, index) => (
+              <JourneyCard
+                key={row.id}
+                itinerary={row}
+                selected={selectedItinerary === index}
+                onSelect={() => setSelectedItinerary(index)}
+              />
+            ))}
+            {result.data && !result.data.value.length && (
+              <p className="status-line">
+                Nincs elérhető útvonal erre az időpontra. Próbálj másik indulást
+                vagy közeli megállót.
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {pickerOpen && (
@@ -163,12 +330,21 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
         onClose={() => setServicesOpen(false)}
         title={t.plannerLocalServices}
         actions={
-          <button type="button" className="text-button" onClick={() => setServicesOpen(false)}>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => setServicesOpen(false)}
+          >
             {t.plannerLocalServicesDone}
           </button>
         }
       >
         <p>{t.plannerLocalServicesDetail}</p>
+        <p className="notice">
+          A Worker jelenleg a BKK által ismert járatokkal tervez. A helyi
+          szolgáltatók beállítása ezen az eszközön megmarad, de a külön helyi
+          menetrendek még nem részei a webes tervezésnek.
+        </p>
         <div className="service-list">
           {LOCAL_PROVIDERS.map((provider) => {
             const checked = preferences.localProviders.includes(provider.id);
@@ -185,8 +361,15 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
                     const enabled = (event.target as HTMLInputElement).checked;
                     preferences.update({
                       localProviders: enabled
-                        ? [...new Set([...preferences.localProviders, provider.id])]
-                        : preferences.localProviders.filter((id) => id !== provider.id),
+                        ? [
+                            ...new Set([
+                              ...preferences.localProviders,
+                              provider.id,
+                            ]),
+                          ]
+                        : preferences.localProviders.filter(
+                            (id) => id !== provider.id,
+                          ),
                     });
                   }}
                 />
@@ -199,17 +382,39 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
   );
 }
 
-function EndpointField({ field, endpoint, current, onClick }: { field: Field; endpoint: Endpoint | null; current: boolean; onClick: () => void }) {
+function EndpointField({
+  field,
+  endpoint,
+  current,
+  onClick,
+}: {
+  field: Field;
+  endpoint: Endpoint | null;
+  current: boolean;
+  onClick: () => void;
+}) {
   const label = field === "origin" ? t.plannerFrom : t.plannerTo;
-  const icon = current ? "my_location" : field === "origin" ? "trip_origin" : "location_on";
-  const name = current || endpoint?.id === "current" ? t.plannerCurrent : (endpoint?.name ?? (field === "destination" ? t.plannerSubtitle : t.plannerChoose));
+  const icon = current
+    ? "my_location"
+    : field === "origin"
+      ? "trip_origin"
+      : "location_on";
+  const name =
+    current || endpoint?.id === "current"
+      ? t.plannerCurrent
+      : (endpoint?.name ??
+        (field === "destination" ? t.plannerSubtitle : t.plannerChoose));
   return (
     <button type="button" className="endpoint-field" onClick={onClick}>
       <Icon name={icon} className="primary" />
       <span className="endpoint-text">
         <span className="t-label-medium on-variant">{label}</span>
         <span className="t-body-large clamp-2">{name}</span>
-        {endpoint?.detail && !current && <span className="t-body-small on-variant clamp-1">{endpoint.detail}</span>}
+        {endpoint?.detail && !current && (
+          <span className="t-body-small on-variant clamp-1">
+            {endpoint.detail}
+          </span>
+        )}
       </span>
       <Icon name="chevron_right" className="on-variant" />
     </button>
@@ -217,7 +422,17 @@ function EndpointField({ field, endpoint, current, onClick }: { field: Field; en
 }
 
 /** DeparturePicker.kt: now, or a date and time in Budapest time. */
-function DeparturePicker({ open, departure, onClose, onConfirm }: { open: boolean; departure: Date | null; onClose: () => void; onConfirm: (value: Date | null) => void }) {
+function DeparturePicker({
+  open,
+  departure,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  departure: Date | null;
+  onClose: () => void;
+  onConfirm: (value: Date | null) => void;
+}) {
   const initial = budapestParts(departure ?? new Date(Date.now() + 300_000));
   const [later, setLater] = useState(departure != null);
   const [date, setDate] = useState(initial.date);
@@ -266,11 +481,22 @@ function DeparturePicker({ open, departure, onClose, onConfirm }: { open: boolea
         <>
           <label className="date-field">
             <Icon name="calendar_month" size={20} />
-            <input type="date" value={date} min={budapestParts(new Date()).date} onChange={(event) => setDate(event.target.value)} aria-label={t.plannerDeparture} />
+            <input
+              type="date"
+              value={date}
+              min={budapestParts(new Date()).date}
+              onChange={(event) => setDate(event.target.value)}
+              aria-label={t.plannerDeparture}
+            />
           </label>
           <label className="date-field">
             <Icon name="schedule" size={20} />
-            <input type="time" value={time} onChange={(event) => setTime(event.target.value)} aria-label={t.plannerDeparture} />
+            <input
+              type="time"
+              value={time}
+              onChange={(event) => setTime(event.target.value)}
+              aria-label={t.plannerDeparture}
+            />
           </label>
           <p className="t-body-small">{t.plannerDepartureZone}</p>
         </>
@@ -282,12 +508,14 @@ function DeparturePicker({ open, departure, onClose, onConfirm }: { open: boolea
 
 /** PlannerScreen.kt PlannerSearch. Stop suggestions arrive with the EMMA/BKK stop port. */
 function PlannerSearch({
+  active,
   field,
   userPosition,
   onBack,
   onCurrent,
   onChoose,
 }: {
+  active: boolean;
   field: Field;
   userPosition: GeoPoint | null;
   onBack: () => void;
@@ -295,15 +523,37 @@ function PlannerSearch({
   onChoose: (endpoint: Endpoint) => void;
 }) {
   const [query, setQuery] = useState("");
-  const search = usePlaceSearch(query, true);
+  const search = usePlaceSearch(query, active);
+  const transit = useRemote(
+    query.trim().length >= 2
+      ? `planner-search:${query}:${userPosition?.lat.toFixed(2) ?? ""}:${userPosition?.lon.toFixed(2) ?? ""}`
+      : "",
+    (signal) =>
+      searchTransit(
+        query,
+        userPosition ?? { lat: 47.4979, lon: 19.0402 },
+        signal,
+      ),
+    { debounce: 350, active },
+  );
   const places = search.query === query ? search.places : [];
-  const searching = query.trim().length >= 2 && (search.query !== query || search.loading);
+  const searching =
+    query.trim().length >= 2 && (search.query !== query || search.loading);
   return (
     <div className="planner planner-search">
       <div className="search-screen-column">
-        <TransitSearchInput query={query} onQuery={setQuery} onBack={onBack} label={field === "origin" ? t.plannerFrom : t.plannerTo} />
+        <TransitSearchInput
+          query={query}
+          onQuery={setQuery}
+          onBack={onBack}
+          label={field === "origin" ? t.plannerFrom : t.plannerTo}
+        />
         {field === "origin" && (
-          <button type="button" className="button button-tonal current-location-button" onClick={onCurrent}>
+          <button
+            type="button"
+            className="button button-tonal current-location-button"
+            onClick={onCurrent}
+          >
             <Icon name="my_location" size={20} />
             {t.plannerCurrent}
           </button>
@@ -312,12 +562,42 @@ function PlannerSearch({
         <div className="search-results">
           {query.trim().length < 2 ? (
             <>
-              <EmptyState title={t.searchDiscoverTitle} body={t.searchDiscoverBody} icon="search" />
-              <ExampleChips examples={["Keleti pályaudvar", "Kelenföld", "Nyugati pályaudvar"]} onPick={setQuery} />
+              <EmptyState
+                title={t.searchDiscoverTitle}
+                body={t.searchDiscoverBody}
+                icon="search"
+              />
+              <ExampleChips
+                examples={[
+                  "Keleti pályaudvar",
+                  "Kelenföld",
+                  "Nyugati pályaudvar",
+                ]}
+                onPick={setQuery}
+              />
             </>
           ) : (
             <>
-              <p className="status-line t-body-medium">{t.webStopSearchPending}</p>
+              <DataStatus
+                {...transit.data}
+                loading={transit.loading}
+                error={transit.error}
+                retry={transit.retry}
+              />
+              {transit.data?.value.stops.map((stop) => (
+                <StopRow
+                  key={stop.id}
+                  stop={stop}
+                  onSelect={() =>
+                    onChoose({
+                      id: stop.id,
+                      name: stop.name,
+                      detail: `${stop.platform ? stop.platform + " peron · " : ""}${stop.source}`,
+                      position: stop.position,
+                    })
+                  }
+                />
+              ))}
               {places.length > 0 && (
                 <>
                   <SearchGroupTitle title={t.searchPlaces} />
@@ -329,22 +609,133 @@ function PlannerSearch({
                         detail={place.address}
                         index={index}
                         count={places.length}
-                        leading={<ShapeIconTile icon="location_on" size={44} shape="cookie4" />}
-                        trailing={userPosition ? <DistancePill text={formatDistance(distanceMeters(userPosition, place.position))} /> : undefined}
-                        onClick={() => onChoose({ id: place.id, name: place.name, detail: place.address, position: place.position })}
+                        leading={
+                          <ShapeIconTile
+                            icon="location_on"
+                            size={44}
+                            shape="cookie4"
+                          />
+                        }
+                        trailing={
+                          userPosition ? (
+                            <DistancePill
+                              text={formatDistance(
+                                distanceMeters(userPosition, place.position),
+                              )}
+                            />
+                          ) : undefined
+                        }
+                        onClick={() =>
+                          onChoose({
+                            id: place.id,
+                            name: place.name,
+                            detail: place.address,
+                            position: place.position,
+                          })
+                        }
                       />
                     ))}
                   </div>
-                  <p className="status-line t-label-small on-variant">{t.searchPlacesAttribution}</p>
+                  <p className="status-line t-label-small on-variant">
+                    {t.searchPlacesAttribution}
+                  </p>
                 </>
               )}
               {!searching && places.length === 0 && (
-                <p className="status-line t-body-medium">{search.unavailable ? t.plannerSearchError : t.plannerNoPlaces}</p>
+                <p className="status-line t-body-medium">
+                  {search.unavailable
+                    ? t.plannerSearchError
+                    : t.plannerNoPlaces}
+                </p>
               )}
             </>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+function JourneyCard({
+  itinerary,
+  selected,
+  onSelect,
+}: {
+  itinerary: Itinerary;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <article className={`journey-card ${selected ? "journey-selected" : ""}`}>
+      <button
+        type="button"
+        className="journey-card-heading"
+        onClick={onSelect}
+        aria-pressed={selected}
+      >
+        <span>
+          <strong className="t-title-large">
+            {clock(itinerary.start)} – {clock(itinerary.end)}
+          </strong>
+          <small className="on-variant">
+            {Math.round((itinerary.end - itinerary.start) / 60_000)} perc ·{" "}
+            {Math.round(itinerary.walkMeters)} m séta · BKK API
+          </small>
+        </span>
+        <Icon name={selected ? "expand_less" : "expand_more"} />
+      </button>
+      <div className="journey-modes">
+        {itinerary.legs.map((leg, index) =>
+          leg.mode === "WALK" ? (
+            <span key={index} className="journey-walk">
+              <Icon name="directions_walk" size={20} />
+              {Math.round((leg.end - leg.start) / 60_000)}′
+            </span>
+          ) : (
+            <RouteBadge
+              key={index}
+              route={{
+                id: leg.routeId ?? "",
+                mode: leg.mode,
+                name: leg.name || leg.mode,
+                description: "",
+                color: leg.color,
+                textColor: "#fff",
+              }}
+            />
+          ),
+        )}
+      </div>
+
+      {selected && (
+        <ol className="journey-legs">
+          {itinerary.legs.map((leg, index) => (
+            <li key={index}>
+              <strong>
+                {clock(leg.start)} · {leg.from}
+              </strong>
+              <p>
+                {leg.mode === "WALK"
+                  ? "Séta"
+                  : `${leg.name || leg.mode}${leg.live ? " · valós idejű" : " · menetrend"}`}{" "}
+                → {leg.to}
+              </p>
+              <small className="on-variant">
+                Érkezés: {clock(leg.end)}
+                {leg.intermediate.length
+                  ? ` · ${leg.intermediate.length} köztes megálló`
+                  : ""}
+              </small>
+              {leg.intermediate.length > 0 && (
+                <details>
+                  <summary>Köztes megállók</summary>
+                  <p>{leg.intermediate.join(" · ")}</p>
+                </details>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </article>
   );
 }

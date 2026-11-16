@@ -45,7 +45,15 @@ const DEFAULTS: Preferences = {
   favorites: [],
 };
 
-export const DEPARTURE_WINDOWS = [30, 60, 120, 180, 240, 300] as const;
+export const DEPARTURE_WINDOWS = [10, 20, 30, 60, 120] as const;
+
+/** A stored window from an older option list snaps to the nearest offered one. */
+function departureWindow(value: unknown) {
+  const minutes = typeof value === "number" && Number.isFinite(value) ? value : DEFAULTS.windowMinutes;
+  return DEPARTURE_WINDOWS.reduce((best, option) =>
+    Math.abs(option - minutes) < Math.abs(best - minutes) ? option : best,
+  );
+}
 
 /** DepartureTime.compact with Hungarian units. */
 export function compactDuration(minutes: number) {
@@ -65,7 +73,7 @@ function read(): Preferences {
     const stored = JSON.parse(raw) as Partial<Preferences> & { mapStyle?: unknown };
     // Discard the retired map type while retaining existing user preferences.
     delete stored.mapStyle;
-    return { ...DEFAULTS, ...stored };
+    return { ...DEFAULTS, ...stored, windowMinutes: departureWindow(stored.windowMinutes) };
   } catch {
     return DEFAULTS;
   }

@@ -1,52 +1,49 @@
-# bmenetrend-web
+# BMenetrend Web
 
-T3 Stack project scaffolded with `bun create t3-app@latest`: Next.js (Pages Router), React, TypeScript, Tailwind CSS, tRPC, Prisma with SQLite, and NextAuth.
+The browser version of the sibling `../bmenetrend` Android transit app. Built with Next.js Pages Router, React, TypeScript, Tailwind, Material Web and MapLibre. Originally scaffolded with Create T3 App; the unused auth, database and tRPC backend have been removed.
 
-## Web app parity
+## Client-first architecture
 
-This is the web version of the sibling `../bmenetrend` Android app. See [AGENTS.md](AGENTS.md) for source locations, backend contracts and scope. `CLAUDE.md` symlinks to the same instructions.
+The frontend exports to static HTML/CSS/JS in `out/`. Navigation, preferences, maps, location and data requests run in the browser. No Next.js runtime server, local database or authentication secrets are required. A small loopback-only MÁV adapter is used in local development because the official API does not allow browser CORS access.
 
-The root page is an interactive, full-screen MapLibre GL JS map. It matches Android's OpenFreeMap Positron (light) and bundled Night (dark) styles, system-theme switching, initial camera `[18.825, 47.473]` / zoom `13.2`, and blue fallback theme. Pan, zoom, compass and opt-in location work; transit overlays and search are future work.
+The existing Cloudflare Worker at `https://bmenetrend-bkk-proxy.bmenetrend-backend.workers.dev` is the transit backend, shared with Android. Typed transit clients call it directly from the browser; BKK API keys remain in Worker secrets. Photon place search and OpenFreeMap resources already load directly from their providers. Stops, vehicles, departures, line/trip details, search, local favourites and journey planning are wired. Check CORS and source limitations before adding another data source.
 
-Map resources load directly from OpenFreeMap without a key. Map credits and style licences are available from the attribution control. The Night style is copied unchanged from Android; preserve its provenance and licences when updating it. The matching MapLibre worker is prepared automatically before dev/build and served locally, with a versioned URL to prevent stale workers.
+See [AGENTS.md](AGENTS.md) for architecture rules, Android reference files, backend contracts and the current feature scope. `CLAUDE.md` is a relative symlink to those same instructions.
 
-## Development
+## Development and deployment
 
 ```sh
 bun install
-# On a fresh clone, copy .env.example to .env and generate AUTH_SECRET:
-# bunx auth secret
-bun run db:push
 bun run dev
 ```
 
-Open http://localhost:3000. This workspace already has a local `.env`, a generated auth secret, and an initialized SQLite database. Local secrets and database files are ignored by Git.
-
-Discord sign-in becomes available once `AUTH_DISCORD_ID` and `AUTH_DISCORD_SECRET` are configured in `.env`. The app runs without these credentials; sign-in requires a configured provider. For Discord development, use `http://localhost:3000/api/auth/callback/discord` as the redirect URI.
+Open http://localhost:3000. `bun run dev` automatically starts the local MÁV adapter on port 8788 and points the frontend at it. If that port is occupied, it reuses a compatible adapter or selects a free port automatically. No `.env` setup is necessary. Preferences persist locally in the browser.
 
 ```sh
+bun run test
 bun run check
 bun run build
+bun run start
+# Or build and serve together:
+bun run preview
 ```
 
-## Material UI direction
+Deploy the contents of `out/` to static hosting, independently of the existing Cloudflare backend. `start` serves those files on port 3000; it does not run a Next.js application server. Next.js remains the development server and static build tool.
 
-Use Material You / Material 3 Expressive as the direction for future UI work. `@material/web` is installed from the [Material Web documentation](https://github.com/material-components/material-web/tree/main/docs). It provides Material 3 web components; it does not provide a complete Material 3 Expressive component library. No Expressive styling or component showcase is needed yet.
+## UI and maps
 
-Typed React wrappers are available from `~/components/material`: `FilledButton`, `OutlinedButton`, `Checkbox`, `Switch`, and `OutlinedTextField`. They use `@lit/react` for property and event handling, and Next.js dynamic imports with `ssr: false` to register web components only in the browser. The map error state uses `OutlinedButton` for retry. Shared light/dark Material tokens live in `src/styles/globals.css`.
+The responsive Android UI shell includes navigation, map, search, planner, favourites, settings and about screens. Local operator timetable integration and offline timetable packs remain unported; these limitations are disclosed. The app uses Hungarian labels, Material You / Material 3 Expressive styling and the Android fallback palette.
 
-```tsx
-import { FilledButton, OutlinedTextField } from "~/components/material";
+The map uses MapLibre GL JS with OpenFreeMap Liberty recoloured through `scripts/build-google-styles.mjs`. Light and dark street styles follow the app's theme; satellite is intentionally unavailable. The original Android Night style is retained as a reference. Preserve visible map attribution and the bundled licences.
 
-<OutlinedTextField
-  label="Search"
-  onInput={(event) => console.log(event.target)}
-/>;
-<FilledButton type="button" onClick={() => console.log("clicked")}>
-  Search
-</FilledButton>;
-```
+The **MapLibre browser rendering worker** is separate from the Cloudflare transit backend. It is prepared automatically before dev/build and served as a versioned static asset. MapLibre, the app shell and typed Material Web wrappers load through browser-only dynamic imports. UI state belongs in `src/components/app/` and `src/lib/`; shared visual primitives live in `src/components/ui/` and `src/components/material/`.
 
-Import through the entry point above; the individual implementation files load browser APIs. Add more wrappers as needed instead of importing the full component library.
+## Live data and local state
 
-Material Web is currently in maintenance mode; see its [README](https://github.com/material-components/material-web#readme). Keep this in mind when selecting future Expressive components.
+Map traffic is bounded to a grid-snapped area, shared/cached by endpoint and paused when the tab or screen is inactive. Old vehicle observations expire; source times and scheduled/live/cancelled departure states remain distinct. Favourites and static stop metadata persist in this browser without an account. Real-time predictions are not saved as offline data.
+
+The official MÁV/EMMA API supplies railway supplementation and board/trip fallback. It currently omits browser CORS headers, while the Cloudflare path reports unavailable. For local development, the user-approved adapter in `tools/emma-relay/` reaches the official API from this machine and provides origin-scoped CORS responses. It permits only five fixed, bounded MÁV queries, with coalescing, short caches, response/concurrency/request limits and no arbitrary target URL. The BKK Worker remains the primary transit backend.
+
+Local development is ready through `bun run dev`. A deployed static site still needs a separately deployed adapter on an upstream-accepted host, configured at build time with `NEXT_PUBLIC_EMMA_GRAPHQL_URL=https://your-host/graphql`; the local adapter is not deployed automatically. `bun run dev:frontend` runs only Next if you want to use an existing configured adapter. See [adapter setup](tools/emma-relay/README.md).
+
+Transit badges reuse Android's actual PNG artwork and Open Sans bold font. Station dots omit name labels and follow Android's sprite sizing, zoom gates and stable offsets. The tests cover parsing, coupled-vehicle deduplication, response sharing/cancellation, cooldowns, hook visibility, native badge colours, station layout and MapLibre layer validation. Browser WebGL appearance still needs manual visual verification.
