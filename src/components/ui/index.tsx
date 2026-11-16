@@ -37,7 +37,7 @@ type CookieIconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   size?: number;
   shape?: CookieShape;
   elevated?: boolean;
-  tone?: "secondary" | "high";
+  tone?: "secondary" | "high" | "primary";
 };
 
 /**
@@ -60,7 +60,14 @@ export function CookieIconButton({
       type="button"
       aria-label={label}
       title={label}
-      className={`cookie-button cookie-${tone}${elevated ? " cookie-elevated" : ""}${className ? ` ${className}` : ""}`}
+      className={[
+        "cookie-button",
+        `cookie-${tone}`,
+        elevated ? "cookie-elevated" : "",
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
       style={
         {
           width: size,
@@ -92,7 +99,7 @@ export function ShapeIconTile({
 }) {
   return (
     <span
-      className={`shape-tile${prominent ? " shape-tile-prominent" : ""}`}
+      className={`shape-tile ${prominent ? "shape-tile-prominent" : ""}`}
       style={{ width: size, height: size, clipPath: SHAPES[shape] }}
       aria-hidden="true"
     >
@@ -154,7 +161,12 @@ export function SegmentedItem({
     .join(" ");
   if (!onClick) return <div className={classes}>{children}</div>;
   return (
-    <button type="button" className={`${classes} segment-action`} onClick={onClick} aria-label={label}>
+    <button
+      type="button"
+      className={`${classes} segment-action`}
+      onClick={onClick}
+      aria-label={label}
+    >
       {children}
     </button>
   );
@@ -171,6 +183,7 @@ export function ConnectedSelector<T extends string | number>({
   label,
   text,
   className,
+  selectedShape,
 }: {
   options: readonly T[];
   selected: T;
@@ -178,16 +191,36 @@ export function ConnectedSelector<T extends string | number>({
   label: string;
   text: (value: T) => string;
   className?: string;
+  selectedShape?: CookieShape;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   return (
     <div
       role="radiogroup"
       aria-label={label}
-      className={`connected-selector${className ? ` ${className}` : ""}`}
+      className={[
+        "connected-selector",
+        selectedShape ? "connected-cookie" : "",
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={
+        selectedShape
+          ? ({
+              "--connected-shape": SHAPES[selectedShape],
+              "--connected-pressed-shape": SHAPES.circle,
+            } as CSSProperties)
+          : undefined
+      }
       onKeyDown={(event) => {
         const current = options.indexOf(selected);
-        const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+        const step =
+          event.key === "ArrowRight" || event.key === "ArrowDown"
+            ? 1
+            : event.key === "ArrowLeft" || event.key === "ArrowUp"
+              ? -1
+              : 0;
         if (!step) return;
         event.preventDefault();
         const next = (current + step + options.length) % options.length;
@@ -207,7 +240,14 @@ export function ConnectedSelector<T extends string | number>({
             role="radio"
             aria-checked={chosen}
             tabIndex={chosen ? 0 : -1}
-            className={`connected-option${chosen ? " connected-checked" : ""}${index === 0 ? " connected-leading" : ""}${index === options.length - 1 ? " connected-trailing" : ""}`}
+            className={[
+              "connected-option",
+              chosen ? "connected-checked" : "",
+              index === 0 ? "connected-leading" : "",
+              index === options.length - 1 ? "connected-trailing" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
             onClick={() => onSelect(option)}
           >
             <span className="fit-text">{text(option)}</span>
@@ -230,7 +270,13 @@ export function PageHeader({
 }) {
   return (
     <header className="page-header">
-      <button type="button" className="icon-button" onClick={onBack} aria-label={t.back} title={t.back}>
+      <button
+        type="button"
+        className="icon-button"
+        onClick={onBack}
+        aria-label={t.back}
+        title={t.back}
+      >
         <Icon name="arrow_back" />
       </button>
       <h1 className="t-headline-small">{title}</h1>
@@ -247,12 +293,27 @@ const WAVE_WIDTH = 2400;
 const WAVE_PATH = `M0 5${" q5 -4 10 0 t10 0".repeat(WAVE_WIDTH / 20)}`;
 
 /** DesignSystem.kt TransitRefreshBar (Material 3 Expressive wavy progress, indeterminate). */
-export function RefreshBar({ visible, inset = 0 }: { visible: boolean; inset?: number }) {
+export function RefreshBar({
+  visible,
+  inset = 0,
+}: {
+  visible: boolean;
+  inset?: number;
+}) {
   return (
     <div className="refresh-bar" style={{ paddingInline: inset }}>
       {visible && (
-        <div className="wavy-progress" role="progressbar" aria-label={t.loading}>
-          <svg width={WAVE_WIDTH} height="10" viewBox={`0 0 ${WAVE_WIDTH} 10`} aria-hidden="true">
+        <div
+          className="wavy-progress"
+          role="progressbar"
+          aria-label={t.loading}
+        >
+          <svg
+            width={WAVE_WIDTH}
+            height="10"
+            viewBox={`0 0 ${WAVE_WIDTH} 10`}
+            aria-hidden="true"
+          >
             <path d={WAVE_PATH} />
           </svg>
         </div>
@@ -300,7 +361,10 @@ export function Dialog({
       {open && (
         <div className="m3-dialog-body">
           {icon && <Icon name={icon} className="m3-dialog-icon" />}
-          <h2 id="dialog-title" className={`t-headline-small${icon ? " centered" : ""}`}>
+          <h2
+            id="dialog-title"
+            className={`t-headline-small ${icon ? "centered" : ""}`}
+          >
             {title}
           </h2>
           <div className="m3-dialog-content t-body-medium">{children}</div>
@@ -311,9 +375,20 @@ export function Dialog({
   );
 }
 
-export function ExternalLink({ href, children }: { href: string; children: ReactNode }) {
+export function ExternalLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
   return (
-    <a className="text-button link-row" href={href} target="_blank" rel="noopener noreferrer">
+    <a
+      className="text-button link-row"
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
       <span>{children}</span>
       <Icon name="open_in_new" size={16} />
     </a>

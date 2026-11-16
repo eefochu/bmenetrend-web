@@ -1,22 +1,274 @@
-import { Icon, ShapeIconTile } from "~/components/ui";
+import { useEffect, useRef, useState } from "react";
+import { CookieIconButton, Icon, RefreshBar, SegmentedItem, ShapeIconTile } from "~/components/ui";
+import { compactDuration, usePreferences } from "~/lib/preferences";
+import { boards, knownStops } from "~/lib/transit/client";
+import { useClock, useRemote } from "~/lib/transit/hooks";
+import { providerNames, stopProviders } from "~/lib/transit/labels";
+import { clock, type Departure, type Route, type Stop } from "~/lib/transit/model";
 import { t } from "~/lib/strings";
+import { RouteBadge } from "./line-badge";
+import { stopModeIcon } from "./search-components";
+import { PlatformBadge } from "./transit-components";
 
-/**
- * Port of ui/FavoritesScreen.kt. Saved stops come with the stop catalogue port (the heart on a stop's
- * departure board); until then this is the screen's genuine empty state.
- */
-export function FavoritesScreen({ onBrowse }: { onBrowse: () => void }) {
+const RAIL_LABEL = /^[GSZ]\d+/i;
+const RAIL_SERVICES = new Set(["S", "SZ", "G", "GY", "Z", "IC", "IR", "RJ", "RJX", "EC", "EN", "EX"]);
+const isTrain = (route: Route) =>
+  ["RAIL", "SUBURBAN_RAILWAY", "TRAMTRAIN"].includes(route.mode) ||
+  RAIL_LABEL.test(route.name) ||
+  RAIL_SERVICES.has(route.name.toUpperCase());
+
+/** FavoritesScreen.kt naturalCompare: numbers by value, uppercase before lowercase. */
+function naturalCompare(a: string, b: string) {
+  const left = a.match(/[a-zA-Z]+|\d+/g) ?? [];
+  const right = b.match(/[a-zA-Z]+|\d+/g) ?? [];
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const x = left[i]!,
+      y = right[i]!;
+    const nx = /^\d+$/.test(x) ? Number(x) : null;
+    const ny = /^\d+$/.test(y) ? Number(y) : null;
+    if (nx !== null && ny !== null) {
+      if (nx !== ny) return nx - ny;
+    } else if (nx !== null) return -1;
+    else if (ny !== null) return 1;
+    else if (x !== y) return x < y ? -1 : 1;
+  }
+  return left.length - right.length;
+}
+
+/** extractStationLines: trains first, each group de-duplicated by label and naturally sorted. */
+function stationLines(stop: Stop) {
+  const sorted = (routes: Route[]) =>
+    routes
+      .filter((route, index) => route.name && route.name !== "?" && routes.findIndex((other) => other.name === route.name) === index)
+      .sort((a, b) => naturalCompare(a.name, b.name));
+  return [...sorted(stop.routes.filter(isTrain)), ...sorted(stop.routes.filter((route) => !isTrain(route)))];
+}
+
+/** DesignSystem.kt DepartureCount: the countdown box, accent while live. */
+function DepartureCount({ departure, now }: { departure: Departure; now: number }) {
+  const minutes = Math.max(0, Math.ceil((departure.expected - now) / 60_000));
+  const delay = Math.max(0, Math.floor((departure.expected - departure.scheduled) / 60_000));
+  const tone = delay > 0 ? "count-error" : departure.live ? "count-live" : "";
+  return (
+    <span className={`departure-count ${tone}`}>
+      <span className="t-title-large">{minutes <= 0 ? "Most" : compactDuration(minutes)}</span>
+      {delay > 0 && <span className="t-label-medium">+{delay} perc</span>}
+      <span className="departure-count-time t-label-large">
+        {departure.live && <Icon name="sensors" size={12} />}
+        {departure.live && departure.scheduled !== departure.expected
+          ? `Várható: ${clock(departure.expected)}`
+          : clock(departure.expected)}
+      </span>
+    </span>
+  );
+}
+
+function FavoriteMenu({ onAll, onRemove }: { onAll: () => void; onRemove: () => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent ? event.key === "Escape" : !root.current?.contains(event.target as Node))
+        setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [open]);
+  return (
+    <span ref={root} className="favorite-menu-anchor">
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="Továbbiak"
+        title="Továbbiak"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon name="more_vert" className="on-variant" />
+      </button>
+      {open && (
+        <span className="favorite-menu" role="menu">
+          <span className="favorite-menu-group">
+            <button type="button" role="menuitem" className="favorite-menu-item" onClick={() => { setOpen(false); onAll(); }}>
+              <Icon name="schedule" />
+              Összes indulás
+            </button>
+          </span>
+          <span className="favorite-menu-group">
+            <button type="button" role="menuitem" className="favorite-menu-item error-text" onClick={() => { setOpen(false); onRemove(); }}>
+              <Icon name="delete" />
+              Eltávolítás a kedvencek közül
+            </button>
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** FavoritesScreen.kt FavoriteStationCard. */
+function FavoriteStationCard({
+  stop,
+  next,
+  loading,
+  unavailable,
+  now,
+  index,
+  count,
+  onStop,
+  onRemove,
+}: {
+  stop: Stop;
+  next?: Departure;
+  loading: boolean;
+  unavailable: boolean;
+  now: number;
+  index: number;
+  count: number;
+  onStop: () => void;
+  onRemove: () => void;
+}) {
+  const lines = stationLines(stop);
+  return (
+    <SegmentedItem index={index} count={count} className="favorite-card">
+      <div className="favorite-card-body" onClick={onStop}>
+        <div className="favorite-card-head">
+          <button type="button" className="favorite-card-main" onClick={(event) => { event.stopPropagation(); onStop(); }}>
+            <ShapeIconTile icon={stopModeIcon(stop)} size={44} shape="cookie9" />
+            <span className="favorite-card-title">
+              <span className="favorite-card-name">
+                <span className="t-title-medium clamp-2">{stop.name}</span>
+                <PlatformBadge code={stop.platform} />
+              </span>
+              <span className="t-label-medium on-variant clamp-1">{providerNames(stopProviders(stop))}</span>
+            </span>
+          </button>
+          <span onClick={(event) => event.stopPropagation()}>
+            <FavoriteMenu onAll={onStop} onRemove={onRemove} />
+          </span>
+        </div>
+        <span className="favorite-card-lines">
+          {lines.length ? (
+            <span className="station-badge-grid">
+              {lines.map((route) => (
+                <RouteBadge key={route.id} route={route} compact />
+              ))}
+            </span>
+          ) : loading ? (
+            <RefreshBar visible />
+          ) : (
+            <span className="t-body-medium on-variant">
+              {unavailable
+                ? "A megálló járatlistája nem tölthető be. Próbálj frissíteni."
+                : "Nincsenek elérhető vonalak ehhez a megállóhoz"}
+            </span>
+          )}
+          {next && (
+            <span className="favorite-next">
+              <RouteBadge route={next.route} compact />
+              <span className="t-body-medium-emphasized clamp-2 grow">{next.destination || next.route.description}</span>
+              <DepartureCount departure={next} now={now} />
+            </span>
+          )}
+        </span>
+      </div>
+    </SegmentedItem>
+  );
+}
+
+/** FavoritesScreen.kt: device-local saved stops, their lines and next departure. */
+export function FavoritesScreen({
+  active = true,
+  onBrowse,
+  onStop,
+}: {
+  active?: boolean;
+  onBrowse: () => void;
+  onStop: (stop: Stop) => void;
+}) {
+  const { favorites, update, windowMinutes } = usePreferences();
+  const now = useClock();
+  const catalogue = new Map(knownStops().map((stop) => [stop.id, stop]));
+  const stops = favorites.map((id) => catalogue.get(id)).filter((stop): stop is Stop => Boolean(stop));
+  const key = stops.length ? `favorites:${stops.map((stop) => stop.id).join(",")}:${windowMinutes}` : "";
+  const remote = useRemote(
+    key,
+    async (signal) => {
+      return {
+        value: await boards(stops, windowMinutes, signal),
+        at: Date.now(),
+        incomplete: false,
+        fallbackUnavailable: false,
+      };
+    },
+    { active, interval: 60_000, debounce: 300 },
+  );
+  const missing = favorites.filter((id) => !catalogue.has(id));
   return (
     <div className="favorites-screen">
-      <div className="page-intro">
-        <h1 className="t-headline-large-emphasized">{t.favoritesTitle}</h1>
+      <div className="page-intro favorites-intro">
+        <h1 className="t-headline-large-emphasized grow">{t.favoritesTitle}</h1>
+        {favorites.length > 0 && (
+          <CookieIconButton
+            label="Járatlisták frissítése"
+            size={52}
+            disabled={remote.loading}
+            onClick={remote.retry}
+          >
+            <Icon name="refresh" className={remote.loading ? "spinning" : ""} />
+          </CookieIconButton>
+        )}
       </div>
       <div className="favorites-list">
-        <div className="favorites-empty">
-          <ShapeIconTile icon="favorite" shape="cookie12" />
-          <h2 className="t-title-large centered">{t.favoritesIntro}</h2>
-          <p className="t-body-medium on-variant centered">{t.favoritesEmpty}</p>
-        </div>
+        {stops.length === 0 ? (
+          <div className="favorites-empty">
+            <ShapeIconTile icon="favorite" shape="cookie12" />
+            <h2 className="t-title-large centered">{t.favoritesIntro}</h2>
+            <p className="t-body-medium on-variant centered">
+              {favorites.length ? "A kedvenc megállók betöltése…" : t.favoritesEmpty}
+            </p>
+          </div>
+        ) : (
+          stops.map((stop, index) => {
+            const rows = remote.data?.value[index];
+            const next = rows
+              ?.filter((row) => !row.cancelled && row.expected >= now)
+              .sort((a, b) => a.expected - b.expected)[0];
+            return (
+              <FavoriteStationCard
+                key={stop.id}
+                stop={stop}
+                next={next}
+                loading={remote.loading}
+                unavailable={rows === null}
+                now={now}
+                index={index}
+                count={stops.length}
+                onStop={() => onStop(stop)}
+                onRemove={() => update({ favorites: favorites.filter((saved) => saved !== stop.id) })}
+              />
+            );
+          })
+        )}
+        {missing.map((id) => (
+          <div key={id} className="notice">
+            <Icon name="info" size={17} />
+            <p className="t-body-small grow">A mentett megálló adatai nem érhetők el: {id}</p>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => update({ favorites: favorites.filter((saved) => saved !== id) })}
+            >
+              Eltávolítás
+            </button>
+          </div>
+        ))}
       </div>
       <div className="favorites-action">
         <button type="button" className="button button-filled button-hero" onClick={onBrowse}>

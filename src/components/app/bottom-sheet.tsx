@@ -82,9 +82,12 @@ export function BottomSheet({ value, onChange, areaHeight, peek, topReserve = 8,
       const anchors = ORDER.map((anchor) => ({ anchor, at: offsetFor(anchor) }));
       let target: SheetValue;
       if (Math.abs(velocity) > 0.5) {
-        // Fling: move one anchor in the fling direction from where the drag ends.
-        const candidates = velocity > 0 ? anchors.filter((a) => a.at > offset.current) : anchors.filter((a) => a.at < offset.current);
-        target = (velocity > 0 ? candidates.sort((a, b) => a.at - b.at)[0] : candidates.sort((a, b) => b.at - a.at)[0])?.anchor ?? value;
+        // Fling: settle on the next anchor in the fling direction from where the drag ends. A drag that
+        // already reached the last anchor (clamped at the bottom or top) stays there instead of bouncing back.
+        const down = velocity > 0;
+        const ahead = anchors.filter((a) => (down ? a.at >= offset.current - 1 : a.at <= offset.current + 1));
+        const outermost = down ? anchors[0]! : anchors[anchors.length - 1]!;
+        target = (down ? ahead.sort((a, b) => a.at - b.at)[0] : ahead.sort((a, b) => b.at - a.at)[0])?.anchor ?? outermost.anchor;
       } else {
         target = anchors.reduce((best, a) => (Math.abs(a.at - offset.current) < Math.abs(best.at - offset.current) ? a : best)).anchor;
       }

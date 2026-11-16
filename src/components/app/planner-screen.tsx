@@ -1,18 +1,50 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Checkbox, Radio } from "~/components/material";
 import TransitMap from "~/components/map/transit-map";
-import { CookieIconButton, Dialog, EmptyState, Icon, RefreshBar, ShapeIconTile } from "~/components/ui";
+import {
+  CookieIconButton,
+  Dialog,
+  EmptyState,
+  Icon,
+  PageHeader,
+  RefreshBar,
+  ShapeIconTile,
+} from "~/components/ui";
+import { ItineraryCard, JourneyDetail, PLANNER_SOURCE } from "./journey-components";
 import { mapStyleUrl } from "~/lib/map-config";
 import { distanceMeters, formatDistance, type GeoPoint } from "~/lib/places";
 import { LOCAL_PROVIDERS, usePreferences } from "~/lib/preferences";
+import { searchTransit } from "~/lib/transit/client";
+import { emmaSearch, mergeStops } from "~/lib/transit/emma";
+import { recommendStations } from "~/lib/transit/recommendations";
+import { planJourney } from "~/lib/transit/planner";
+import { useClock, useRemote } from "~/lib/transit/hooks";
+import { clock } from "~/lib/transit/model";
+import { DataStatus } from "./transit-components";
 import { t } from "~/lib/strings";
 import { useBackLayer } from "~/lib/use-back-layer";
 import type { UserLocation } from "~/lib/use-user-location";
 import { MapAttribution } from "./map-attribution";
-import { DistancePill, ExampleChips, SearchGroupTitle, SearchResultCard, TransitSearchInput, usePlaceSearch } from "./search-components";
+import {
+  DistancePill,
+  ExampleChips,
+  SearchGroupTitle,
+  SearchRecommendation,
+  SearchResultCard,
+  StopSearchRow,
+  TransitSearchInput,
+  usePlaceSearch,
+} from "./search-components";
+import { stopSubtitle } from "~/lib/transit/labels";
+import type { Stop } from "~/lib/transit/model";
 
-type Endpoint = { id: string; name: string; detail: string; position: GeoPoint };
+type Endpoint = {
+  id: string;
+  name: string;
+  detail: string;
+  position: GeoPoint;
+};
 type Field = "origin" | "destination";
 
 const ZONE = "Europe/Budapest";
@@ -23,31 +55,72 @@ function budapestInstant(date: string, time: string): Date | null {
   const [h, mi] = time.split(":").map(Number);
   if (!y || !m || !d || h == null || mi == null) return null;
   const naive = Date.UTC(y, m - 1, d, h, mi);
-  const format = new Intl.DateTimeFormat("en-US", { timeZone: ZONE, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const format = new Intl.DateTimeFormat("en-US", {
+    timeZone: ZONE,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
   const matches = [60, 120]
     .map((offset) => naive - offset * 60_000)
     .filter((ms) => {
-      const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map((part) => [part.type, part.value]));
-      return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute)) === naive;
+      const parts = Object.fromEntries(
+        format
+          .formatToParts(new Date(ms))
+          .map((part) => [part.type, part.value]),
+      );
+      return (
+        Date.UTC(
+          Number(parts.year),
+          Number(parts.month) - 1,
+          Number(parts.day),
+          Number(parts.hour),
+          Number(parts.minute),
+        ) === naive
+      );
     });
   return matches.length === 1 ? new Date(matches[0]!) : null;
 }
 
 function budapestParts(at: Date) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", { timeZone: ZONE, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: ZONE,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })
       .formatToParts(at)
       .map((part) => [part.type, part.value]),
   );
-  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+  };
 }
 
 function departureLabel(at: Date) {
-  return new Intl.DateTimeFormat("hu-HU", { timeZone: ZONE, dateStyle: "medium", timeStyle: "short" }).format(at);
+  return new Intl.DateTimeFormat("hu-HU", {
+    timeZone: ZONE,
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(at);
 }
 
 /** Port of ui/PlannerScreen.kt (PlannerMapOverlay and PlannerSearch). Itineraries come with the EMMA planner port. */
-export function PlannerScreen({ location }: { location: UserLocation }) {
+export function PlannerScreen({
+  location,
+  active = true,
+}: {
+  location: UserLocation;
+  active?: boolean;
+}) {
   const preferences = usePreferences();
   const [origin, setOrigin] = useState<Endpoint | null>(null);
   const [destination, setDestination] = useState<Endpoint | null>(null);
@@ -59,13 +132,73 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
   useBackLayer(editing != null, () => setEditing(null));
 
   const current: Endpoint | null = location.position
-    ? { id: "current", name: t.plannerCurrent, detail: "", position: location.position }
+    ? {
+        id: "current",
+        name: t.plannerCurrent,
+        detail: "",
+        position: location.position,
+      }
     : null;
   const effectiveOrigin = useLocation ? current : origin;
+
+  const [planRequest, setPlanRequest] = useState<{
+    from: Endpoint;
+    to: Endpoint;
+    at: Date;
+    id: number;
+  } | null>(null);
+  // PlannerScreen.kt: the results are their own screen (inResultsView), a chosen journey another.
+  const [resultsView, setResultsView] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const result = useRemote(
+    planRequest ? `plan:${planRequest.id}` : "",
+    async (signal) => {
+      const outcome = await planJourney(planRequest!.from, planRequest!.to, planRequest!.at, signal);
+      return { value: outcome, at: outcome.requestedAt, incomplete: outcome.partial, fallbackUnavailable: false };
+    },
+    { active: active && !editing, once: true },
+  );
+  const now = useClock();
+  useBackLayer(selectedId != null, () => setSelectedId(null));
+  useBackLayer(resultsView && selectedId == null, () => setResultsView(false));
+  const outcome = result.data?.value;
+  const find = (at: Date | null = departure) => {
+    setPlanError(null);
+    if (!effectiveOrigin) {
+      if (useLocation) {
+        location.request();
+        setPlanError("A helyzeted még nem érhető el. Engedélyezd a helyhozzáférést, vagy válassz kiindulópontot.");
+        setResultsView(true);
+      }
+      return;
+    }
+    if (!destination) return;
+    if (distanceMeters(effectiveOrigin.position, destination.position) < 50) {
+      setPlanError("Válassz a kiindulóponttól távolabbi célt.");
+      setResultsView(true);
+      return;
+    }
+    if (at && at.getTime() < Date.now() - 60_000) {
+      setPlanError("A megadott indulási idő elmúlt. Válassz későbbi időpontot, vagy indulj most.");
+      setResultsView(true);
+      return;
+    }
+    setSelectedId(null);
+    setResultsView(true);
+    setPlanRequest({ from: effectiveOrigin, to: destination, at: at ?? new Date(), id: Date.now() });
+  };
+  const shift = (minutes: number) => {
+    const base = departure ?? new Date(outcome?.readyAt ?? Date.now());
+    const next = new Date(base.getTime() + minutes * 60_000);
+    setDeparture(next);
+    find(next);
+  };
 
   if (editing) {
     return (
       <PlannerSearch
+        active={active}
         field={editing}
         userPosition={location.position}
         onBack={() => setEditing(null)}
@@ -94,81 +227,252 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
 
   const findButton = (
     <div className="planner-find">
-      <button type="button" className="button button-filled button-block button-tall" disabled aria-describedby="planner-pending">
+      <button
+        type="button"
+        className="button button-filled button-block button-tall"
+        disabled={(!effectiveOrigin && !useLocation) || !destination || result.loading}
+        onClick={() => find()}
+      >
         <Icon name="route" size={20} />
         {t.plannerFind}
       </button>
-      <p id="planner-pending" className="t-body-small on-variant">
-        {t.webPlannerPending}
-      </p>
     </div>
   );
+
+  const endpointName = (endpoint: Endpoint | null) =>
+    endpoint?.id === "current" ? t.plannerCurrent : (endpoint?.name ?? "");
+  const picker = pickerOpen && (
+    <DeparturePicker
+      open
+      departure={departure}
+      onClose={() => setPickerOpen(false)}
+      onConfirm={(value) => {
+        setDeparture(value);
+        setPickerOpen(false);
+      }}
+    />
+  );
+  const endpoints = (
+    <div className="endpoints">
+      <div className="endpoints-fields">
+        <EndpointField field="origin" endpoint={effectiveOrigin} current={useLocation} onClick={() => setEditing("origin")} />
+        <hr className="endpoint-divider" />
+        <EndpointField field="destination" endpoint={destination} current={false} onClick={() => setEditing("destination")} />
+      </div>
+      <CookieIconButton label={t.plannerSwap} size={52} tone="high" onClick={swap} disabled={!effectiveOrigin && !destination}>
+        <Icon name="swap_vert" />
+      </CookieIconButton>
+    </div>
+  );
+  const departureChip = (
+    <button type="button" className="assist-chip" onClick={() => setPickerOpen(true)}>
+      <Icon name="schedule" size={18} />
+      {departure ? departureLabel(departure) : t.plannerLeaveNow}
+      <Icon name="expand_more" size={16} />
+    </button>
+  );
+
+  const selected = outcome?.itineraries.find((trip) => trip.id === selectedId);
+  if (selected && outcome && planRequest)
+    return (
+      <JourneyDetail
+        trip={selected}
+        readyAt={outcome.readyAt}
+        originName={endpointName(planRequest.from)}
+        destinationName={endpointName(planRequest.to)}
+        now={now}
+        departureText={departure ? departureLabel(departure) : t.plannerLeaveNow}
+        onBack={() => setSelectedId(null)}
+      />
+    );
+
+  if (resultsView) {
+    const planning = result.loading;
+    const itineraries = outcome?.itineraries ?? [];
+    const error =
+      planError ??
+      (result.error
+        ? "Az útvonaltervezés átmenetileg nem érhető el. Ellenőrizd a kapcsolatot, és próbáld újra."
+        : outcome && !itineraries.length
+          ? "A megadott időpontban nem találtunk megfelelő útvonalat. Próbálj másik időpontot vagy kiindulópontot."
+          : null);
+    const base = departure ?? new Date(outcome?.readyAt ?? now);
+    return (
+      <div className="fullscreen-layer page planner-results" role="dialog" aria-modal="true" aria-label={t.plannerTitle}>
+        <PageHeader
+          title={t.plannerTitle}
+          onBack={() => setResultsView(false)}
+          actions={
+            <CookieIconButton label="Újratervezés" size={48} disabled={planning} onClick={() => find()}>
+              <Icon name="refresh" className={planning ? "spinning" : ""} />
+            </CookieIconButton>
+          }
+        />
+        <div className="page-scroll">
+          <div className="planner-results-column">
+            {endpoints}
+            <div className="chip-row tight">{departureChip}</div>
+            {itineraries.length > 0 && (
+              <div className="planner-shift">
+                <button
+                  type="button"
+                  className="button button-outlined"
+                  disabled={planning || base.getTime() - 15 * 60_000 <= now}
+                  onClick={() => shift(-15)}
+                >
+                  <Icon name="arrow_back" size={18} />
+                  15 perccel korábban
+                </button>
+                <button type="button" className="button button-outlined" disabled={planning} onClick={() => shift(15)}>
+                  15 perccel később
+                  <Icon name="arrow_forward" size={18} />
+                </button>
+              </div>
+            )}
+            <button
+              type="button"
+              className="button button-filled button-block button-tall"
+              disabled={(!effectiveOrigin && !useLocation) || !destination || planning}
+              onClick={() => find()}
+            >
+              {planning ? (
+                <>
+                  <span className="button-spinner" aria-hidden="true" />
+                  Megfelelő útvonal keresése…
+                </>
+              ) : (
+                <>
+                  <Icon name="route" size={20} />
+                  {t.plannerFind}
+                </>
+              )}
+            </button>
+            {error && !planning && <div className="planner-error t-body-medium">{error}</div>}
+            {outcome && itineraries.length > 0 && !planning && (
+              <>
+                {outcome.partial && (
+                  <p className="t-body-medium on-variant">
+                    Egyes menetrendek vagy gyalogos kapcsolatok most nem érhetők el, ezért további útvonalak is
+                    lehetségesek. Próbálj újratervezni.
+                  </p>
+                )}
+                <div>
+                  <h2 className="t-title-large-emphasized">Útvonalak</h2>
+                  <p className="t-body-small on-variant">
+                    Lekérdezve: {clock(outcome.requestedAt)} · kényelem és utazási idő szerint
+                  </p>
+                </div>
+                {itineraries.map((trip, index) => (
+                  <ItineraryCard
+                    key={trip.id}
+                    trip={trip}
+                    recommended={index === 0}
+                    now={now}
+                    ready={outcome.readyAt}
+                    onClick={() => setSelectedId(trip.id)}
+                  />
+                ))}
+                <p className="t-body-small on-variant">{PLANNER_SOURCE}</p>
+              </>
+            )}
+          </div>
+        </div>
+        {picker}
+      </div>
+    );
+  }
 
   return (
     <div className="planner">
       <div className="planner-layout">
-      <div className="planner-controls">
-        <div className="planner-title-row">
-          <h1 className="t-title-large">{t.plannerTitle}</h1>
-        </div>
-        <div className="endpoints">
-          <div className="endpoints-fields">
-            <EndpointField field="origin" endpoint={effectiveOrigin} current={useLocation} onClick={() => setEditing("origin")} />
-            <hr className="endpoint-divider" />
-            <EndpointField field="destination" endpoint={destination} current={false} onClick={() => setEditing("destination")} />
+        <div className="planner-controls">
+          <div className="planner-title-row">
+            <h1 className="t-title-large">{t.plannerTitle}</h1>
           </div>
-          <CookieIconButton label={t.plannerSwap} size={52} tone="high" onClick={swap} disabled={!effectiveOrigin && !destination}>
-            <Icon name="swap_vert" />
-          </CookieIconButton>
+          <div className="endpoints">
+            <div className="endpoints-fields">
+              <EndpointField
+                field="origin"
+                endpoint={effectiveOrigin}
+                current={useLocation}
+                onClick={() => setEditing("origin")}
+              />
+              <hr className="endpoint-divider" />
+              <EndpointField
+                field="destination"
+                endpoint={destination}
+                current={false}
+                onClick={() => setEditing("destination")}
+              />
+            </div>
+            <CookieIconButton
+              label={t.plannerSwap}
+              size={52}
+              tone="high"
+              onClick={swap}
+              disabled={!effectiveOrigin && !destination}
+            >
+              <Icon name="swap_vert" />
+            </CookieIconButton>
+          </div>
+          <div className="chip-row tight">
+            <button
+              type="button"
+              className="assist-chip"
+              onClick={() => setPickerOpen(true)}
+            >
+              <Icon name="schedule" size={18} />
+              {departure ? departureLabel(departure) : t.plannerLeaveNow}
+              <Icon name="expand_more" size={16} />
+            </button>
+            <button
+              type="button"
+              className="assist-chip"
+              onClick={() => setServicesOpen(true)}
+            >
+              <Icon name="tune" size={18} />
+              {t.plannerLocalServices}
+              <Icon name="expand_more" size={16} />
+            </button>
+          </div>
+          {destination && <div className="planner-find-wide">{findButton}</div>}
         </div>
-        <div className="chip-row tight">
-          <button type="button" className="assist-chip" onClick={() => setPickerOpen(true)}>
-            <Icon name="schedule" size={18} />
-            {departure ? departureLabel(departure) : t.plannerLeaveNow}
-            <Icon name="expand_more" size={16} />
-          </button>
-          <button type="button" className="assist-chip" onClick={() => setServicesOpen(true)}>
-            <Icon name="tune" size={18} />
-            {t.plannerLocalServices}
-            <Icon name="expand_more" size={16} />
-          </button>
+        <div className="planner-map">
+          <TransitMap
+            styleUrl={mapStyleUrl(preferences.dark)}
+            userPosition={location.position}
+            route={{
+              origin: effectiveOrigin?.position ?? null,
+              destination: destination?.position ?? null,
+            }}
+            routeColor={preferences.scheme.primary}
+          />
+          <MapAttribution className="planner-attribution" />
         </div>
-        {destination && <div className="planner-find-wide">{findButton}</div>}
-      </div>
-      <div className="planner-map">
-        <TransitMap
-          styleUrl={mapStyleUrl(preferences.dark)}
-          userPosition={location.position}
-          route={{ origin: effectiveOrigin?.position ?? null, destination: destination?.position ?? null }}
-          routeColor={preferences.scheme.primary}
-        />
-        <MapAttribution className="planner-attribution" />
-      </div>
-      {destination && <div className="planner-find-narrow">{findButton}</div>}
+        {destination && <div className="planner-find-narrow">{findButton}</div>}
       </div>
 
-      {pickerOpen && (
-        <DeparturePicker
-          open
-          departure={departure}
-          onClose={() => setPickerOpen(false)}
-          onConfirm={(value) => {
-            setDeparture(value);
-            setPickerOpen(false);
-          }}
-        />
-      )}
+      {picker}
       <Dialog
         open={servicesOpen}
         onClose={() => setServicesOpen(false)}
         title={t.plannerLocalServices}
         actions={
-          <button type="button" className="text-button" onClick={() => setServicesOpen(false)}>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => setServicesOpen(false)}
+          >
             {t.plannerLocalServicesDone}
           </button>
         }
       >
         <p>{t.plannerLocalServicesDetail}</p>
+        <p className="notice">
+          A Worker jelenleg a BKK által ismert járatokkal tervez. A helyi
+          szolgáltatók beállítása ezen az eszközön megmarad, de a külön helyi
+          menetrendek még nem részei a webes tervezésnek.
+        </p>
         <div className="service-list">
           {LOCAL_PROVIDERS.map((provider) => {
             const checked = preferences.localProviders.includes(provider.id);
@@ -185,8 +489,15 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
                     const enabled = (event.target as HTMLInputElement).checked;
                     preferences.update({
                       localProviders: enabled
-                        ? [...new Set([...preferences.localProviders, provider.id])]
-                        : preferences.localProviders.filter((id) => id !== provider.id),
+                        ? [
+                            ...new Set([
+                              ...preferences.localProviders,
+                              provider.id,
+                            ]),
+                          ]
+                        : preferences.localProviders.filter(
+                            (id) => id !== provider.id,
+                          ),
                     });
                   }}
                 />
@@ -199,17 +510,39 @@ export function PlannerScreen({ location }: { location: UserLocation }) {
   );
 }
 
-function EndpointField({ field, endpoint, current, onClick }: { field: Field; endpoint: Endpoint | null; current: boolean; onClick: () => void }) {
+function EndpointField({
+  field,
+  endpoint,
+  current,
+  onClick,
+}: {
+  field: Field;
+  endpoint: Endpoint | null;
+  current: boolean;
+  onClick: () => void;
+}) {
   const label = field === "origin" ? t.plannerFrom : t.plannerTo;
-  const icon = current ? "my_location" : field === "origin" ? "trip_origin" : "location_on";
-  const name = current || endpoint?.id === "current" ? t.plannerCurrent : (endpoint?.name ?? (field === "destination" ? t.plannerSubtitle : t.plannerChoose));
+  const icon = current
+    ? "my_location"
+    : field === "origin"
+      ? "trip_origin"
+      : "location_on";
+  const name =
+    current || endpoint?.id === "current"
+      ? t.plannerCurrent
+      : (endpoint?.name ??
+        (field === "destination" ? t.plannerSubtitle : t.plannerChoose));
   return (
     <button type="button" className="endpoint-field" onClick={onClick}>
       <Icon name={icon} className="primary" />
       <span className="endpoint-text">
         <span className="t-label-medium on-variant">{label}</span>
         <span className="t-body-large clamp-2">{name}</span>
-        {endpoint?.detail && !current && <span className="t-body-small on-variant clamp-1">{endpoint.detail}</span>}
+        {endpoint?.detail && !current && (
+          <span className="t-body-small on-variant clamp-1">
+            {endpoint.detail}
+          </span>
+        )}
       </span>
       <Icon name="chevron_right" className="on-variant" />
     </button>
@@ -217,7 +550,17 @@ function EndpointField({ field, endpoint, current, onClick }: { field: Field; en
 }
 
 /** DeparturePicker.kt: now, or a date and time in Budapest time. */
-function DeparturePicker({ open, departure, onClose, onConfirm }: { open: boolean; departure: Date | null; onClose: () => void; onConfirm: (value: Date | null) => void }) {
+function DeparturePicker({
+  open,
+  departure,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  departure: Date | null;
+  onClose: () => void;
+  onConfirm: (value: Date | null) => void;
+}) {
   const initial = budapestParts(departure ?? new Date(Date.now() + 300_000));
   const [later, setLater] = useState(departure != null);
   const [date, setDate] = useState(initial.date);
@@ -266,11 +609,22 @@ function DeparturePicker({ open, departure, onClose, onConfirm }: { open: boolea
         <>
           <label className="date-field">
             <Icon name="calendar_month" size={20} />
-            <input type="date" value={date} min={budapestParts(new Date()).date} onChange={(event) => setDate(event.target.value)} aria-label={t.plannerDeparture} />
+            <input
+              type="date"
+              value={date}
+              min={budapestParts(new Date()).date}
+              onChange={(event) => setDate(event.target.value)}
+              aria-label={t.plannerDeparture}
+            />
           </label>
           <label className="date-field">
             <Icon name="schedule" size={20} />
-            <input type="time" value={time} onChange={(event) => setTime(event.target.value)} aria-label={t.plannerDeparture} />
+            <input
+              type="time"
+              value={time}
+              onChange={(event) => setTime(event.target.value)}
+              aria-label={t.plannerDeparture}
+            />
           </label>
           <p className="t-body-small">{t.plannerDepartureZone}</p>
         </>
@@ -282,12 +636,14 @@ function DeparturePicker({ open, departure, onClose, onConfirm }: { open: boolea
 
 /** PlannerScreen.kt PlannerSearch. Stop suggestions arrive with the EMMA/BKK stop port. */
 function PlannerSearch({
+  active,
   field,
   userPosition,
   onBack,
   onCurrent,
   onChoose,
 }: {
+  active: boolean;
   field: Field;
   userPosition: GeoPoint | null;
   onBack: () => void;
@@ -295,15 +651,56 @@ function PlannerSearch({
   onChoose: (endpoint: Endpoint) => void;
 }) {
   const [query, setQuery] = useState("");
-  const search = usePlaceSearch(query, true);
+  const search = usePlaceSearch(query, active);
+  const transit = useRemote(
+    query.trim().length >= 2
+      ? `planner-search:${query}:${userPosition?.lat.toFixed(2) ?? ""}:${userPosition?.lon.toFixed(2) ?? ""}`
+      : "",
+    (signal) =>
+      searchTransit(
+        query,
+        userPosition ?? { lat: 47.4979, lon: 19.0402 },
+        signal,
+      ),
+    { debounce: 350, active },
+  );
+  // Same sources as the main search: BKK, the app's own MÁV/EMMA search, led by the Android recommendation.
+  const emma = useRemote(
+    query.trim().length >= 2 ? `emma-search:${query.trim()}` : "",
+    (signal) => emmaSearch(query, signal),
+    { debounce: 400, active },
+  );
+  const { favorites } = usePreferences();
+  const stops = useMemo(
+    () => mergeStops(transit.data?.value.stops ?? [], emma.data?.value ?? []),
+    [transit.data, emma.data],
+  );
+  // CategorizedSearch.kt, as in the main search: the best station leads as "Talán ezt keresed".
+  const recommendation = useMemo(
+    () => recommendStations(stops, query, userPosition, favorites)[0],
+    [stops, query, userPosition, favorites],
+  );
+  const otherStops = recommendation ? stops.filter((stop) => stop.id !== recommendation.id) : stops;
+  const chooseStop = (stop: Stop) =>
+    onChoose({ id: stop.id, name: stop.name, detail: stopSubtitle(stop), position: stop.position });
   const places = search.query === query ? search.places : [];
-  const searching = query.trim().length >= 2 && (search.query !== query || search.loading);
+  const searching =
+    query.trim().length >= 2 && (search.query !== query || search.loading);
   return (
     <div className="planner planner-search">
       <div className="search-screen-column">
-        <TransitSearchInput query={query} onQuery={setQuery} onBack={onBack} label={field === "origin" ? t.plannerFrom : t.plannerTo} />
+        <TransitSearchInput
+          query={query}
+          onQuery={setQuery}
+          onBack={onBack}
+          label={field === "origin" ? t.plannerFrom : t.plannerTo}
+        />
         {field === "origin" && (
-          <button type="button" className="button button-tonal current-location-button" onClick={onCurrent}>
+          <button
+            type="button"
+            className="button button-tonal current-location-button"
+            onClick={onCurrent}
+          >
             <Icon name="my_location" size={20} />
             {t.plannerCurrent}
           </button>
@@ -312,12 +709,52 @@ function PlannerSearch({
         <div className="search-results">
           {query.trim().length < 2 ? (
             <>
-              <EmptyState title={t.searchDiscoverTitle} body={t.searchDiscoverBody} icon="search" />
-              <ExampleChips examples={["Keleti pályaudvar", "Kelenföld", "Nyugati pályaudvar"]} onPick={setQuery} />
+              <EmptyState
+                title={t.searchDiscoverTitle}
+                body={t.searchDiscoverBody}
+                icon="search"
+              />
+              <ExampleChips
+                examples={[
+                  "Keleti pályaudvar",
+                  "Kelenföld",
+                  "Nyugati pályaudvar",
+                ]}
+                onPick={setQuery}
+              />
             </>
           ) : (
             <>
-              <p className="status-line t-body-medium">{t.webStopSearchPending}</p>
+              <DataStatus
+                at={transit.data?.at}
+                incomplete={Boolean(transit.data?.incomplete) || (Boolean(transit.error) && stops.length > 0)}
+                fallbackUnavailable={Boolean(emma.error) && !transit.error}
+                loading={transit.loading}
+                error={stops.length ? "" : transit.error || emma.error}
+                retry={transit.retry}
+              />
+              {recommendation && (
+                <SearchRecommendation stop={recommendation} onClick={() => chooseStop(recommendation)} />
+              )}
+              {(otherStops.length > 0 || transit.loading) && (
+                <>
+                  <SearchGroupTitle title={t.searchStations} />
+                  {transit.loading && !stops.length && <RefreshBar visible inset={22} />}
+                  <div className="segment-group">
+                    {otherStops.map((stop, index) => (
+                      <StopSearchRow
+                        key={stop.id}
+                        stop={stop}
+                        favorite={favorites.includes(stop.id)}
+                        userPosition={userPosition}
+                        onStop={chooseStop}
+                        index={index}
+                        count={otherStops.length}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
               {places.length > 0 && (
                 <>
                   <SearchGroupTitle title={t.searchPlaces} />
@@ -329,17 +766,44 @@ function PlannerSearch({
                         detail={place.address}
                         index={index}
                         count={places.length}
-                        leading={<ShapeIconTile icon="location_on" size={44} shape="cookie4" />}
-                        trailing={userPosition ? <DistancePill text={formatDistance(distanceMeters(userPosition, place.position))} /> : undefined}
-                        onClick={() => onChoose({ id: place.id, name: place.name, detail: place.address, position: place.position })}
+                        leading={
+                          <ShapeIconTile
+                            icon="location_on"
+                            size={44}
+                            shape="cookie4"
+                          />
+                        }
+                        trailing={
+                          userPosition ? (
+                            <DistancePill
+                              text={formatDistance(
+                                distanceMeters(userPosition, place.position),
+                              )}
+                            />
+                          ) : undefined
+                        }
+                        onClick={() =>
+                          onChoose({
+                            id: place.id,
+                            name: place.name,
+                            detail: place.address,
+                            position: place.position,
+                          })
+                        }
                       />
                     ))}
                   </div>
-                  <p className="status-line t-label-small on-variant">{t.searchPlacesAttribution}</p>
+                  <p className="status-line t-label-small on-variant">
+                    {t.searchPlacesAttribution}
+                  </p>
                 </>
               )}
-              {!searching && places.length === 0 && (
-                <p className="status-line t-body-medium">{search.unavailable ? t.plannerSearchError : t.plannerNoPlaces}</p>
+              {!searching && !transit.loading && places.length === 0 && stops.length === 0 && (
+                <p className="status-line t-body-medium">
+                  {search.unavailable
+                    ? t.plannerSearchError
+                    : t.plannerNoPlaces}
+                </p>
               )}
             </>
           )}
