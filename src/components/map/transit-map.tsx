@@ -15,10 +15,16 @@ import type { Stop, Vehicle } from "~/lib/transit/model";
 import { distanceMeters } from "~/lib/places";
 import {
   updateTransitLayers,
-  VEHICLE_LAYER,
+  VEHICLE_LAYERS,
+  STOP_LAYERS,
   TRANSIT_HIT_LAYERS,
+  OVERVIEW_FACTOR,
+  VEHICLE_DIAMETER,
+  VEHICLE_SELECTED_DIAMETER,
+  vehicleOverview,
   type MapLine,
 } from "./transit-layers";
+import { MIN_REACH, needsZoom, resolveTap, stopDiameter, type TapTarget } from "./map-tap";
 import { attachStyleImages } from "./style-images";
 import { routeCamera } from "./route-camera";
 
@@ -116,6 +122,7 @@ export default function TransitMap({
   const initialStyle = useRef(styleUrl);
   initialStyle.current = styleUrl;
   const transit = useRef({
+    focused: lines.length > 0,
     stops,
     vehicles,
     onStopSelected,
@@ -123,6 +130,7 @@ export default function TransitMap({
     onViewportChanged,
   });
   transit.current = {
+    focused: lines.length > 0,
     stops,
     vehicles,
     onStopSelected,
@@ -184,33 +192,90 @@ export default function TransitMap({
     };
     map.on("moveend", report);
     map.on("load", report);
+    // NativeTransitMap's tap listener: vehicles and stops resolved by their drawn (scaled) circles.
     map.on("click", (event) => {
-      const layers = TRANSIT_HIT_LAYERS.filter((id) => map.getLayer(id));
-      const features = layers.length
-        ? map.queryRenderedFeatures(
-            [
-              [event.point.x - 10, event.point.y - 10],
-              [event.point.x + 10, event.point.y + 10],
-            ],
-            { layers },
-          )
+      const zoom = map.getZoom(),
+        focused = transit.current.focused;
+      const present = (ids: readonly string[]) => ids.filter((id) => map.getLayer(id));
+      const box = (reach: number): [[number, number], [number, number]] => [
+        [event.point.x - reach, event.point.y - reach],
+        [event.point.x + reach, event.point.y + reach],
+      ];
+      const project = (feature: { geometry: GeoJSON.Geometry }) => {
+        const [lon, lat] = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
+        return map.project([lon, lat]);
+      };
+      const vehicleLayers = present(VEHICLE_LAYERS);
+      const overview = vehicleOverview(zoom, focused);
+      const vehicleTargets: TapTarget[] = vehicleLayers.length
+        ? [
+            ...new globalThis.Map(
+              map
+                .queryRenderedFeatures(box(MIN_REACH + VEHICLE_SELECTED_DIAMETER / 2), { layers: vehicleLayers })
+                .map((feature) => {
+                  const point = project(feature);
+                  const diameter =
+                    (feature.properties.selected ? VEHICLE_SELECTED_DIAMETER : VEHICLE_DIAMETER) *
+                    (overview ? OVERVIEW_FACTOR : 1);
+                  const id = String(feature.properties.id);
+                  return [id, { id, x: point.x, y: point.y, radius: diameter / 2 }] as const;
+                }),
+            ).values(),
+          ]
         : [];
-      const vehicleFeature = features.find((feature) =>
-        feature.layer.id.startsWith(VEHICLE_LAYER),
-      );
-      const vehicle = transit.current.vehicles.find(
-        (item) => item.id === vehicleFeature?.properties.id,
-      );
-      if (vehicle) {
-        transit.current.onVehicleSelected?.(vehicle);
-        return;
+      const stopLayers = present(STOP_LAYERS);
+      const diameter = stopDiameter(zoom, focused),
+        scale = diameter / 22,
+        angle = (map.getBearing() * Math.PI) / 180;
+      const stopTargets: TapTarget[] = stopLayers.length
+        ? [
+            ...new globalThis.Map(
+              map.queryRenderedFeatures(box(80), { layers: stopLayers }).map((feature) => {
+                const point = project(feature);
+                const [ox, oy] = (
+                  typeof feature.properties.offset === "string"
+                    ? JSON.parse(feature.properties.offset)
+                    : (feature.properties.offset ?? [0, 0])
+                ) as [number, number];
+                const dx = ox * scale,
+                  dy = oy * scale;
+                const id = String(feature.properties.id);
+                return [
+                  id,
+                  {
+                    id,
+                    x: point.x + dx * Math.cos(angle) + dy * Math.sin(angle),
+                    y: point.y - dx * Math.sin(angle) + dy * Math.cos(angle),
+                    radius: diameter / 2,
+                  },
+                ] as const;
+              }),
+            ).values(),
+          ]
+        : [];
+      const hit = resolveTap(event.point.x, event.point.y, vehicleTargets, stopTargets);
+      if (hit?.kind === "vehicle") {
+        const vehicle = transit.current.vehicles.find((item) => item.id === hit.target.id);
+        if (vehicle) {
+          transit.current.onVehicleSelected?.(vehicle);
+          return;
+        }
       }
-      const stop = transit.current.stops.find(
-        (item) => item.id === features[0]?.properties.id,
-      );
-      if (stop) {
-        transit.current.onStopSelected?.(stop);
-        return;
+      if (hit?.kind === "stop") {
+        if (needsZoom(stopTargets, hit.target, zoom)) {
+          // Genuinely overlapping overview rings: zoom in instead of guessing which one was meant.
+          map.easeTo({
+            center: event.lngLat,
+            zoom: Math.min(19, Math.max(16, zoom + 2)),
+            duration: 450,
+          });
+          return;
+        }
+        const stop = transit.current.stops.find((item) => item.id === hit.target.id);
+        if (stop) {
+          transit.current.onStopSelected?.(stop);
+          return;
+        }
       }
       click.current?.();
     });

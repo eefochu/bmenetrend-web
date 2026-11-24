@@ -1,6 +1,7 @@
 import { Icon } from "~/components/ui";
 import { clock, type Departure } from "~/lib/transit/model";
 import { RouteBadge } from "./line-badge";
+import { shownDestination } from "~/lib/transit/destination";
 
 function timing(row: Departure, now: number) {
   const shown = row.cancelled ? row.scheduled : row.expected;
@@ -10,8 +11,8 @@ function timing(row: Departure, now: number) {
     Math.floor((row.expected - row.scheduled) / 60_000),
   );
   const live = row.live && !row.cancelled;
-  const destination =
-    row.destination || row.route.description || "A forrás nem adta meg a menetirányt.";
+  // DestinationFormatter.clean(...).ifBlank { destination }, then emma_vehicle_no_direction.
+  const destination = shownDestination(row.destination, row.route.name) || "A forrás nem adta meg a menetirányt.";
   return { shown, minutes, delay, live, destination };
 }
 

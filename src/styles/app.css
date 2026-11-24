@@ -1083,6 +1083,21 @@ p {
 .itinerary-recommended { border-color: transparent; background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); }
 .itinerary-recommended:hover { background: color-mix(in srgb, var(--md-sys-color-primary-container) 92%, var(--md-sys-color-on-primary-container)); }
 .itinerary-card:focus-visible { outline: 3px solid var(--md-sys-color-secondary); outline-offset: 2px; }
+.itinerary-card > span:first-child:empty { display: none; }
+.itinerary-card-main { display: flex; flex-direction: column; gap: 16px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: start; cursor: pointer; }
+.itinerary-card-main:focus-visible { outline: 3px solid var(--md-sys-color-secondary); outline-offset: 6px; border-radius: 8px; }
+
+/* DisruptionNotice.kt: a compact surface; important notices use the tertiary container. */
+.disruption-notice { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 12px; border: 0; border-radius: var(--shape-md); background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface-variant); font: inherit; text-align: start; cursor: pointer; }
+.disruption-notice.important { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
+.disruption-notice:focus-visible { outline: 3px solid var(--md-sys-color-secondary); outline-offset: 2px; }
+.disruption-text { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.panel-notice { width: auto; margin: 6px 18px; }
+.journey-notice { margin-bottom: 12px; }
+.disruption-details { display: flex; flex-direction: column; gap: 16px; max-height: 460px; overflow-y: auto; }
+.disruption-item { display: flex; flex-direction: column; gap: 6px; }
+.disruption-item h3, .disruption-item p { margin: 0; }
+.disruption-item hr { width: 100%; border: 0; border-top: 1px solid var(--md-sys-color-outline-variant); margin: 10px 0 0; }
 .itinerary-legs { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .itinerary-leg { display: inline-flex; align-items: center; gap: 4px; }
 .itinerary-summary { display: flex; align-items: center; gap: 12px; }

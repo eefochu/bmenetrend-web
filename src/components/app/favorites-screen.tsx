@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CookieIconButton, Icon, RefreshBar, SegmentedItem, ShapeIconTile } from "~/components/ui";
 import { compactDuration, usePreferences } from "~/lib/preferences";
 import { boards, knownStops } from "~/lib/transit/client";
@@ -9,7 +9,10 @@ import { t } from "~/lib/strings";
 import { RouteBadge } from "./line-badge";
 import { stopModeIcon } from "./search-components";
 import { PlatformBadge } from "./transit-components";
+import { StationDisruptionNotice } from "./disruption-notice";
+import { shownDestination } from "~/lib/transit/destination";
 
+const EMPTY: Departure[] = [];
 const RAIL_LABEL = /^[GSZ]\d+/i;
 const RAIL_SERVICES = new Set(["S", "SZ", "G", "GY", "Z", "IC", "IR", "RJ", "RJX", "EC", "EN", "EX"]);
 const isTrain = (route: Route) =>
@@ -44,20 +47,15 @@ function stationLines(stop: Stop) {
   return [...sorted(stop.routes.filter(isTrain)), ...sorted(stop.routes.filter((route) => !isTrain(route)))];
 }
 
-/** DesignSystem.kt DepartureCount: the countdown box, accent while live. */
+/** DesignSystem.kt DepartureCount as FavoritesScreen calls it: minutes, clock and the live accent only. */
 function DepartureCount({ departure, now }: { departure: Departure; now: number }) {
   const minutes = Math.max(0, Math.ceil((departure.expected - now) / 60_000));
-  const delay = Math.max(0, Math.floor((departure.expected - departure.scheduled) / 60_000));
-  const tone = delay > 0 ? "count-error" : departure.live ? "count-live" : "";
   return (
-    <span className={`departure-count ${tone}`}>
+    <span className={`departure-count ${departure.live ? "count-live" : ""}`}>
       <span className="t-title-large">{minutes <= 0 ? "Most" : compactDuration(minutes)}</span>
-      {delay > 0 && <span className="t-label-medium">+{delay} perc</span>}
       <span className="departure-count-time t-label-large">
         {departure.live && <Icon name="sensors" size={12} />}
-        {departure.live && departure.scheduled !== departure.expected
-          ? `Várható: ${clock(departure.expected)}`
-          : clock(departure.expected)}
+        {clock(departure.expected)}
       </span>
     </span>
   );
@@ -116,6 +114,7 @@ function FavoriteMenu({ onAll, onRemove }: { onAll: () => void; onRemove: () => 
 function FavoriteStationCard({
   stop,
   next,
+  departures,
   loading,
   unavailable,
   now,
@@ -126,6 +125,7 @@ function FavoriteStationCard({
 }: {
   stop: Stop;
   next?: Departure;
+  departures: Departure[];
   loading: boolean;
   unavailable: boolean;
   now: number;
@@ -135,9 +135,10 @@ function FavoriteStationCard({
   onRemove: () => void;
 }) {
   const lines = stationLines(stop);
+  const stops = useMemo(() => [stop], [stop]);
   return (
     <SegmentedItem index={index} count={count} className="favorite-card">
-      <div className="favorite-card-body" onClick={onStop}>
+      <div className="favorite-card-body" data-favorite={stop.id} onClick={onStop}>
         <div className="favorite-card-head">
           <button type="button" className="favorite-card-main" onClick={(event) => { event.stopPropagation(); onStop(); }}>
             <ShapeIconTile icon={stopModeIcon(stop)} size={44} shape="cookie9" />
@@ -169,10 +170,16 @@ function FavoriteStationCard({
                 : "Nincsenek elérhető vonalak ehhez a megállóhoz"}
             </span>
           )}
+          <span onClick={(event) => event.stopPropagation()}>
+            <StationDisruptionNotice stops={stops} departures={departures} />
+          </span>
+          {unavailable && lines.length > 0 && (
+            <span className="t-body-small on-variant">A frissítés nem sikerült. A legutóbbi ismert járatlistát látod.</span>
+          )}
           {next && (
             <span className="favorite-next">
               <RouteBadge route={next.route} compact />
-              <span className="t-body-medium-emphasized clamp-2 grow">{next.destination || next.route.description}</span>
+              <span className="t-body-medium-emphasized clamp-2 grow">{shownDestination(next.destination, next.route.name)}</span>
               <DepartureCount departure={next} now={now} />
             </span>
           )}
@@ -195,20 +202,72 @@ export function FavoritesScreen({
   const { favorites, update, windowMinutes } = usePreferences();
   const now = useClock();
   const catalogue = new Map(knownStops().map((stop) => [stop.id, stop]));
-  const stops = favorites.map((id) => catalogue.get(id)).filter((stop): stop is Stop => Boolean(stop));
-  const key = stops.length ? `favorites:${stops.map((stop) => stop.id).join(",")}:${windowMinutes}` : "";
+  // FavoriteDepartures.stations: saved stations in name order, independent of the map.
+  const stops = favorites
+    .map((id) => catalogue.get(id))
+    .filter((stop): stop is Stop => Boolean(stop))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // ensureFavoriteRequest: only the favourites on screen (or the first three), at most eight.
+  const list = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState<string[]>([]);
+  const order = stops.map((stop) => stop.id).join(",");
+  useEffect(() => {
+    const root = list.current;
+    if (!root || typeof IntersectionObserver === "undefined") return;
+    const shown = new Set<string>();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.favorite;
+        if (!id) continue;
+        if (entry.isIntersecting) shown.add(id);
+        else shown.delete(id);
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => setVisible([...shown].sort()), 250);
+    });
+    root.querySelectorAll<HTMLElement>("[data-favorite]").forEach((node) => observer.observe(node));
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [order]);
+  const requested = (() => {
+    const onScreen = stops.filter((stop) => visible.includes(stop.id));
+    return (onScreen.length ? onScreen : stops.slice(0, 3)).slice(0, 8);
+  })();
+  const key = requested.length ? `favorites:${requested.map((stop) => stop.id).sort().join(",")}:${windowMinutes}` : "";
   const remote = useRemote(
     key,
     async (signal) => {
+      const rows = await boards(requested, windowMinutes, signal);
       return {
-        value: await boards(stops, windowMinutes, signal),
+        value: new Map(requested.map((stop, index) => [stop.id, rows[index] ?? null])),
         at: Date.now(),
         incomplete: false,
         fallbackUnavailable: false,
       };
     },
-    { active, interval: 60_000, debounce: 300 },
+    { active, interval: 60_000, debounce: 300, keepPrevious: true },
   );
+  // Failed stations are retried after 15, 30, 60 and then every 120 seconds while the screen is visible.
+  const failures = remote.data ? [...remote.data.value].filter(([, rows]) => rows === null).length : 0;
+  const attempts = useRef(0);
+  const retry = remote.retry;
+  useEffect(() => {
+    if (!active || remote.loading) return;
+    if (!failures) {
+      attempts.current = 0;
+      return;
+    }
+    const wait = Math.min(120_000, 15_000 * 2 ** Math.min(attempts.current, 3));
+    attempts.current++;
+    const timer = setTimeout(retry, wait);
+    return () => clearTimeout(timer);
+  }, [failures, remote.data, remote.loading, active, retry]);
+  useEffect(() => {
+    attempts.current = 0;
+  }, [key]);
   const missing = favorites.filter((id) => !catalogue.has(id));
   return (
     <div className="favorites-screen">
@@ -225,7 +284,7 @@ export function FavoritesScreen({
           </CookieIconButton>
         )}
       </div>
-      <div className="favorites-list">
+      <div className="favorites-list" ref={list}>
         {stops.length === 0 ? (
           <div className="favorites-empty">
             <ShapeIconTile icon="favorite" shape="cookie12" />
@@ -236,7 +295,7 @@ export function FavoritesScreen({
           </div>
         ) : (
           stops.map((stop, index) => {
-            const rows = remote.data?.value[index];
+            const rows = remote.data?.value.get(stop.id);
             const next = rows
               ?.filter((row) => !row.cancelled && row.expected >= now)
               .sort((a, b) => a.expected - b.expected)[0];
@@ -245,7 +304,8 @@ export function FavoritesScreen({
                 key={stop.id}
                 stop={stop}
                 next={next}
-                loading={remote.loading}
+                departures={rows ?? EMPTY}
+                loading={remote.loading && rows === undefined}
                 unavailable={rows === null}
                 now={now}
                 index={index}

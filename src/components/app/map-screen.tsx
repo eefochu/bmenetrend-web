@@ -12,7 +12,8 @@ import TransitMap from "~/components/map/transit-map";
 import { CookieIconButton, Icon } from "~/components/ui";
 import { mapStyleUrl, sheetPeekHeight } from "~/lib/map-config";
 import { distanceMeters } from "~/lib/places";
-import { boards, routeVehicles, stopsAt, vehiclesAt, knownStops } from "~/lib/transit/client";
+import { boards, routeVehicles, stopsAt, tripVehicle, vehiclesAt, knownStops } from "~/lib/transit/client";
+import { departureVehicle } from "~/lib/transit/departure-navigation";
 import { journeyStops } from "~/components/map/stop-directions";
 import { vehicleLineColor } from "~/lib/transit/labels";
 import {
@@ -45,6 +46,9 @@ import { BottomSheet, type SheetValue } from "./bottom-sheet";
 import { MapAttribution } from "./map-attribution";
 import { NearbyPanel, type NearbyStation } from "./nearby-panel";
 import { SearchScreen } from "./search-screen";
+
+/** Zoomed out further, "nearby" would be whatever lies near the map centre: keep the last selection. */
+const NEARBY_MIN_ZOOM = 11;
 
 /** Above this map width the departures panel docks at the side, as a desktop layout. */
 const DOCKED_WIDTH = 900;
@@ -94,7 +98,8 @@ export function MapScreen({
     `stops:${areaKey}`,
     (signal) => stopsAt(area, area.radius, signal),
     {
-      active: active && !searchOpen && area.zoom >= 12,
+      // TransitViewModel.NEARBY_MIN_ZOOM: nearby boards (and so the stops they need) follow the map from 11.
+      active: active && !searchOpen && area.zoom >= NEARBY_MIN_ZOOM,
       interval: 300_000,
       debounce: 350,
       keepPrevious: true,
@@ -169,7 +174,16 @@ export function MapScreen({
     null,
   );
   const [journey, setJourney] = useState<Snapshot<Journey> | null>(null);
+  // TransitViewModel.departureVehicleJob: a departure whose vehicle is not on the map yet asks the
+  // Worker which vehicle runs its trip. Any other navigation aborts it, so a late answer never opens a vehicle.
+  const departureLookup = useRef<AbortController | null>(null);
+  const cancelDepartureVehicle = useCallback(() => {
+    departureLookup.current?.abort();
+    departureLookup.current = null;
+  }, []);
+  useEffect(() => cancelDepartureVehicle, [cancelDepartureVehicle]);
   const chooseStop = useCallback((stop: Stop) => {
+    cancelDepartureVehicle();
     setSelectedRoute(null);
     setSelectedStop(stop);
     setSelectedDeparture(null);
@@ -178,8 +192,9 @@ export function MapScreen({
     setSelectedVehicle(null);
     setSearchOpen(false);
     setSheet("partial");
-  }, []);
+  }, [cancelDepartureVehicle]);
   const chooseVehicle = useCallback((vehicle: Vehicle) => {
+    cancelDepartureVehicle();
     setSelectedRoute(null);
     setSelectedVehicle(vehicle);
     setSelectedDeparture(null);
@@ -188,13 +203,14 @@ export function MapScreen({
     setTripId(vehicle.tripId);
     setSearchOpen(false);
     setSheet("partial");
-  }, []);
+  }, [cancelDepartureVehicle]);
   useEffect(() => {
     if (requestedStop) chooseStop(requestedStop);
   }, [requestedStop, chooseStop]);
   useBackLayer(
     !!selectedStop || !!tripId || !!selectedVehicle || !!selectedRoute,
     () => {
+      cancelDepartureVehicle();
       setSelectedRoute(null);
       setSelectedStop(null);
       setSelectedDeparture(null);
@@ -221,7 +237,10 @@ export function MapScreen({
     [journey, stops],
   );
   const focusedRouteId =
-    selectedRoute?.id ?? selectedVehicle?.route?.id ?? journey?.value.routeId;
+    selectedRoute?.id ??
+    selectedVehicle?.route?.id ??
+    (tripId ? selectedDeparture?.route.id : undefined) ??
+    journey?.value.routeId;
   // The highlighted line's own vehicles, whatever the zoom or map area (Worker-served lines only;
   // MÁV-only `emma:` lines keep the area vehicles).
   const routeVehicleResource = useRemote(
@@ -250,7 +269,9 @@ export function MapScreen({
     userLat !== undefined &&
     userLon !== undefined &&
     distanceMeters(area, { lat: userLat, lon: userLon }) < 700;
+  const previousCandidates = useRef<{ stop: Stop; distance: number }[]>([]);
   const nearbyCandidates = useMemo(() => {
+    if (area.zoom < NEARBY_MIN_ZOOM) return previousCandidates.current;
     const anchor =
       nearbyAtUser && userLat !== undefined && userLon !== undefined
         ? { lat: userLat, lon: userLon }
@@ -260,7 +281,8 @@ export function MapScreen({
       .filter((candidate) => candidate.distance <= 1_500)
       .sort((a, b) => a.distance - b.distance)
       .slice(0, 6);
-  }, [stops, area.lat, area.lon, nearbyAtUser, userLat, userLon]);
+  }, [stops, area.lat, area.lon, area.zoom, nearbyAtUser, userLat, userLon]);
+  previousCandidates.current = nearbyCandidates;
   const nearbyKey = nearbyCandidates.length
     ? `nearby:${nearbyCandidates.map((candidate) => candidate.stop.id).join(",")}:${preferences.windowMinutes}`
     : "";
@@ -405,8 +427,47 @@ export function MapScreen({
     chooseStop,
   ]);
 
+  // ViaBuszScreen.kt openDeparture: a departure whose vehicle is loaded opens exactly as tapping that
+  // vehicle on the map; otherwise its trip opens at once and the Worker is asked for the running vehicle
+  // (TransitViewModel.findDepartureVehicle), which then replaces the preview with the vehicle view.
+  const loadedVehicles = useRef<Vehicle[]>([]);
+  loadedVehicles.current = [...displayedVehicles, ...vehicles];
+  const openDeparture = (departure: Departure) => {
+    cancelDepartureVehicle();
+    const observed = departureVehicle(departure, loadedVehicles.current);
+    if (observed) {
+      chooseVehicle(observed);
+      return;
+    }
+    setSelectedRoute(null);
+    setSelectedVehicle(null);
+    setSelectedDeparture(departure);
+    setTripId(departure.tripId);
+    setJourney(null);
+    setSearchOpen(false);
+    setSheet("partial");
+    if (departure.cancelled || !departure.tripId || !navigator.onLine) return;
+    const controller = new AbortController();
+    departureLookup.current = controller;
+    // BKK_JOURNEY_TIMEOUT_MS
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    tripVehicle(departure.tripId, controller.signal)
+      .then((vehicle) => {
+        if (vehicle && !controller.signal.aborted && departureLookup.current === controller)
+          chooseVehicle(vehicle);
+      })
+      .catch(() => {
+        /* No vehicle yet, a failed lookup or a superseded one: the trip preview stays. */
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        if (departureLookup.current === controller) departureLookup.current = null;
+      });
+  };
+
   // ViaBuszScreen.kt closeLine / closeVehicle: leave the route view, back to the board that opened it.
   const closeRoute = () => {
+    cancelDepartureVehicle();
     setSelectedRoute(null);
     setTripId("");
     setSelectedDeparture(null);
@@ -430,6 +491,7 @@ export function MapScreen({
   // Hiding the sheet dismisses whatever it showed, like Android's sheet-hidden LaunchedEffect.
   const changeSheet = (value: SheetValue) => {
     if (value === "hidden") {
+      cancelDepartureVehicle();
       setSelectedRoute(null);
       setTripId("");
       setSelectedDeparture(null);
@@ -588,7 +650,7 @@ export function MapScreen({
               active={active && !searchOpen}
               departure={selectedDeparture}
               vehicle={selectedVehicle}
-              highlightStopId={selectedStop?.id}
+              highlightStopId={selectedStop?.id ?? selectedDeparture?.stopId}
               onBack={closeRoute}
               onClose={closeRoute}
               onStop={chooseStop}
@@ -603,12 +665,7 @@ export function MapScreen({
               expanded={sheet === "expanded"}
               onToggleExpand={toggleExpand}
               onCollapse={collapse}
-              onTrip={(departure) => {
-                setSelectedDeparture(departure);
-                setTripId(departure.tripId);
-                setJourney(null);
-                setSheet("partial");
-              }}
+              onTrip={(departure) => openDeparture(departure)}
             />
           ) : (
             <NearbyPanel
@@ -620,12 +677,7 @@ export function MapScreen({
               now={now}
               atUser={nearbyAtUser}
               status={
-                area.zoom < 12
-                  ? "A megállókhoz nagyíts a térképre."
-                  : location.status === "denied" ||
-                      location.status === "unavailable"
-                    ? t.locationDenied
-                    : null
+                location.status === "denied" || location.status === "unavailable" ? t.locationDenied : null
               }
               notice={
                 <DataStatus
@@ -653,11 +705,7 @@ export function MapScreen({
               }
               expanded={sheet === "expanded"}
               onStop={chooseStop}
-              onDeparture={(departure, stop) => {
-                chooseStop(stop);
-                setSelectedDeparture(departure);
-                setTripId(departure.tripId);
-              }}
+              onDeparture={(departure) => openDeparture(departure)}
               onRefresh={() => {
                 nearbyResource.retry();
                 stopResource.retry();
@@ -674,6 +722,7 @@ export function MapScreen({
         <SearchScreen
           onStop={chooseStop}
           onRoute={(route) => {
+            cancelDepartureVehicle();
             setSelectedRoute(route);
             setSelectedStop(null);
             setTripId("");
@@ -686,6 +735,7 @@ export function MapScreen({
           userPosition={location.position}
           onBack={() => setSearchOpen(false)}
           onPlace={(chosen) => {
+            cancelDepartureVehicle();
             setPlace(chosen);
             setPlaceRequest((value) => value + 1);
             setSearchOpen(false);

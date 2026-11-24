@@ -1,5 +1,5 @@
 import Image from "next/image";
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   CookieIconButton,
   EmptyState,
@@ -33,6 +33,9 @@ import {
 } from "~/lib/transit/labels";
 import { serviceStyle, transport } from "~/lib/transit/badges";
 import { useClock, useRemote } from "~/lib/transit/hooks";
+import { disruptionStop, disruptionTrip, lineContext } from "~/lib/transit/disruptions";
+import { shownDestination } from "~/lib/transit/destination";
+import { DisruptionNotice, StationDisruptionNotice } from "./disruption-notice";
 
 export { RouteBadge } from "./line-badge";
 import { RouteBadge } from "./line-badge";
@@ -239,12 +242,16 @@ export function StopBoard({
     // A short debounce: quickly tapping through stops requests only the one that stays open.
     { active, interval: 20_000, debounce: 200 },
   );
-  const rows =
-    resource.data?.value.filter(
-      (row) =>
-        row.expected >= now - 30_000 &&
-        row.expected <= now + preferences.windowMinutes * 60_000,
-    ) ?? [];
+  const rows = useMemo(
+    () =>
+      resource.data?.value.filter(
+        (row) =>
+          row.expected >= now - 30_000 &&
+          row.expected <= now + preferences.windowMinutes * 60_000,
+      ) ?? [],
+    [resource.data, now, preferences.windowMinutes],
+  );
+  const stops = useMemo(() => [stop], [stop]);
   const refreshing = resource.loading;
   return (
     <div className="stop-panel">
@@ -296,6 +303,7 @@ export function StopBoard({
         <hr className="panel-divider" />
       )}
       <div className="panel-scroll">
+        <StationDisruptionNotice stops={stops} departures={rows} className="panel-notice" />
         {resource.error && (
           <Notice icon="wifi_off" error>
             {resource.error}{" "}
@@ -477,8 +485,7 @@ function RouteDirectionRow({
 /** DesignSystem.kt DepartureDetails: the chosen departure's own metadata. */
 function DepartureDetails({ departure, platform }: { departure: Departure; platform?: string }) {
   const live = departure.live && !departure.cancelled;
-  const destination =
-    departure.destination || departure.route.description || "A forrás nem adta meg a menetirányt.";
+  const destination = shownDestination(departure.destination, departure.route.name);
   return (
     <div className="departure-details">
       <span className="t-title-medium">{destination}</span>
@@ -582,18 +589,33 @@ export function TripPanel({
     if (resource.data) geometryCallback.current?.(resource.data);
   }, [resource.data]);
   const journey = resource.data?.value;
-  const stops = journey?.stops ?? [];
+  const stops = useMemo(() => journey?.stops ?? [], [journey]);
   const scroller = useRef<HTMLDivElement>(null);
-  const route: Route = departure?.route ??
-    vehicle?.route ?? {
-      id: journey?.routeId ?? tripId,
-      name: journey?.name ?? vehicle?.name ?? "?",
-      description: "",
-      mode: vehicle?.mode ?? "BUS",
-      color: journey?.color ?? "#199DCF",
-      textColor: "#ffffff",
-    };
+  const route: Route = useMemo(
+    () =>
+      departure?.route ??
+      vehicle?.route ?? {
+        id: journey?.routeId ?? tripId,
+        name: journey?.name ?? vehicle?.name ?? "?",
+        description: "",
+        mode: vehicle?.mode ?? "BUS",
+        color: journey?.color ?? "#199DCF",
+        textColor: "#ffffff",
+      },
+    [departure, vehicle, journey, tripId],
+  );
   const color = vehicle ? vehicleLineColor(vehicle) : lineColor(route, journey);
+  // VehiclePanel / LineBrowser: the line's notices, its stops on this trip and (for a vehicle) its trip.
+  const minute = Math.floor(now / 60_000);
+  const disruptionContexts = useMemo(
+    () => [
+      lineContext(route, minute * 60_000, {
+        stops: new Set(stops.flatMap(({ stop }) => [disruptionStop(stop.id) ?? disruptionStop(stop.rawId)].filter((id): id is string => !!id))),
+        trip: vehicle ? disruptionTrip(vehicle.bkkTripId ?? vehicle.tripId) : null,
+      }),
+    ],
+    [route, stops, vehicle, minute],
+  );
   const destination =
     [departure?.destination, vehicle?.destination, stops.at(-1)?.stop.name].find(Boolean) ?? "";
   const origin = stops[0]?.stop.name;
@@ -669,6 +691,7 @@ export function TripPanel({
     const stale = now - vehicle.observedAt > 180_000;
     return (
       <div className="stop-panel">
+        <DisruptionNotice contexts={disruptionContexts} className="panel-notice" />
         <div className="vehicle-header" data-sheet-drag>
           <button type="button" className="icon-button" aria-label="Vissza" title="Vissza" onClick={onBack}>
             <Icon name="arrow_back" />
@@ -729,6 +752,7 @@ export function TripPanel({
       <hr className="panel-divider full" />
       <div className="panel-scroll">
         {departure && <DepartureDetails departure={departure} />}
+        <DisruptionNotice contexts={disruptionContexts} className="panel-notice" />
         {resource.loading && resource.data && <RefreshBar visible />}
         {destination && (
           <RouteDirectionRow route={route} destination={destination} origin={origin} />
@@ -767,9 +791,24 @@ export function LinePanel({
     const value = resource.data?.value[direction ?? 0];
     if (value && resource.data) callback.current({ ...resource.data, value });
   }, [resource.data, direction]);
-  const variants = resource.data?.value ?? [];
+  const variants = useMemo(() => resource.data?.value ?? [], [resource.data]);
   const journey = direction === null ? undefined : variants[direction];
   const color = lineColor(route, journey);
+  const now = useClock();
+  const minute = Math.floor(now / 60_000);
+  // LineBrowser.kt: the line's notices with every stop of its variants.
+  const disruptionContexts = useMemo(
+    () => [
+      lineContext(route, minute * 60_000, {
+        stops: new Set(
+          variants.flatMap((variant) =>
+            variant.stops.map(({ stop }) => disruptionStop(stop.id) ?? disruptionStop(stop.rawId)).filter((id): id is string => !!id),
+          ),
+        ),
+      }),
+    ],
+    [route, variants, minute],
+  );
   return (
     <div className="stop-panel">
       <RouteHeader
@@ -780,6 +819,7 @@ export function LinePanel({
       <hr className="panel-divider full" />
       <div className="panel-scroll">
         {resource.loading && <RefreshBar visible />}
+        <DisruptionNotice contexts={disruptionContexts} className="panel-notice" />
         {resource.error && (
           <div className="panel-message">
             <p className="t-body-medium">A menetirányok nem tölthetők be. Próbáld újra.</p>

@@ -33,6 +33,8 @@ export type Vehicle = {
   source: Source;
   bearing?: number;
   mode?: string;
+  /** BKK's trip for a Volán bus that also has an EMMA record (Vehicle.bkkTripId). */
+  bkkTripId?: string;
 };
 export type Departure = {
   source: Source;
@@ -46,6 +48,8 @@ export type Departure = {
   live: boolean;
   cancelled: boolean;
   serviceDate: string;
+  /** The vehicle a live local feed names for this departure (Departure.vehicleId); BKK boards have none. */
+  vehicleId?: string;
 };
 export type Snapshot<T> = {
   source?: Source;
@@ -68,14 +72,16 @@ export type Journey = {
 };
 export type Leg = {
   routeId?: string;
+  /** TransitRoute.providerId of the ride (bkk, hev, mav, volan, viabusz, kanyargo, homm); absent for walks. */
+  provider?: string;
   mode: string;
   name: string;
   color: string;
   from: string;
   to: string;
   /** Source positions of the leg's ends (PlanPoint). */
-  fromPosition?: GeoPoint;
-  toPosition?: GeoPoint;
+  fromPosition: GeoPoint;
+  toPosition: GeoPoint;
   fromPlatform?: string;
   toPlatform?: string;
   headsign?: string;
@@ -88,7 +94,15 @@ export type Leg = {
   live: boolean;
   geometry: [number, number][];
   intermediate: string[];
-  source: Source;
+  /** Planner that produced the leg; absent for local timetables (PlanLeg.source). */
+  source?: Source;
+  /** Registration-only service (RouteDirection.restrictedService). */
+  restricted?: boolean;
+  /** Router provenance of a BKK journey: consecutive legs it connected itself (PlanLeg.routerJourney). */
+  routerJourney?: string;
+  routerPrevious?: string;
+  tripId?: string;
+  serviceDate?: string;
 };
 export type Itinerary = {
   id: string;
@@ -96,6 +110,8 @@ export type Itinerary = {
   end: number;
   walkMeters: number;
   legs: Leg[];
+  /** When the source planner answered, if known (TripItinerary.fetchedAt). */
+  fetchedAt?: number;
 };
 
 export type Row = Record<string, unknown>;
