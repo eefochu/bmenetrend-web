@@ -38,6 +38,7 @@ const ICONS = [
   "tram",
   "trip_origin",
   "tune",
+  "warning",
   "wifi_off",
 ];
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Checkbox, Radio } from "~/components/material";
 import TransitMap from "~/components/map/transit-map";
@@ -18,7 +18,7 @@ import { LOCAL_PROVIDERS, usePreferences } from "~/lib/preferences";
 import { searchTransit } from "~/lib/transit/client";
 import { emmaSearch, mergeStops } from "~/lib/transit/emma";
 import { recommendStations } from "~/lib/transit/recommendations";
-import { planJourney } from "~/lib/transit/planner";
+import { plannerSession, type PlanForm } from "~/lib/transit/planner";
 import { useClock, useRemote } from "~/lib/transit/hooks";
 import { clock } from "~/lib/transit/model";
 import { DataStatus } from "./transit-components";
@@ -141,10 +141,23 @@ export function PlannerScreen({
     : null;
   const effectiveOrigin = useLocation ? current : origin;
 
+  // PlannerViewModel: the form's search runs in the background once it is complete (warm plan);
+  // Find joins it when it still answers exactly this form, the refresh button always searches fresh.
+  const session = plannerSession();
+  const form = (from: Endpoint | null = effectiveOrigin, at: Date | null = departure): PlanForm | null =>
+    from && destination
+      ? {
+          origin: { id: from.id, name: from.name, position: from.position },
+          destination: { id: destination.id, name: destination.name, position: destination.position },
+          departure: at?.getTime() ?? null,
+          localProviders: preferences.localProviders,
+        }
+      : null;
   const [planRequest, setPlanRequest] = useState<{
     from: Endpoint;
     to: Endpoint;
-    at: Date;
+    form: PlanForm;
+    force: boolean;
     id: number;
   } | null>(null);
   // PlannerScreen.kt: the results are their own screen (inResultsView), a chosen journey another.
@@ -154,40 +167,74 @@ export function PlannerScreen({
   const result = useRemote(
     planRequest ? `plan:${planRequest.id}` : "",
     async (signal) => {
-      const outcome = await planJourney(planRequest!.from, planRequest!.to, planRequest!.at, signal);
+      const outcome = await session.plan(planRequest!.form, planRequest!.force, signal);
       return { value: outcome, at: outcome.requestedAt, incomplete: outcome.partial, fallbackUnavailable: false };
     },
     { active: active && !editing, once: true },
   );
+  const planning = result.loading;
+  // warmOnlinePlan runs after choosing an endpoint, swapping, a new departure or provider set; editing a
+  // field cancels it. Location updates alone do not restart it (the 20 m origin tolerance covers them).
+  const [formRevision, setFormRevision] = useState(0);
+  const changed = () => setFormRevision((value) => value + 1);
+  const latestForm = useRef(form);
+  latestForm.current = form;
+  const planningRef = useRef(planning);
+  planningRef.current = planning;
+  useEffect(() => {
+    if (editing) {
+      session.cancelWarmup();
+      return;
+    }
+    const current = latestForm.current();
+    if (current && !planningRef.current && navigator.onLine) session.prefetch(current);
+  }, [formRevision, editing, session]);
+  useEffect(() => () => session.cancelWarmup(), [session]);
   const now = useClock();
   useBackLayer(selectedId != null, () => setSelectedId(null));
-  useBackLayer(resultsView && selectedId == null, () => setResultsView(false));
+  const closeResults = () => {
+    // cancelPlan: leaving the results drops the search and any prefetch.
+    setResultsView(false);
+    setPlanRequest(null);
+    session.cancelWarmup();
+  };
+  useBackLayer(resultsView && selectedId == null, closeResults);
   const outcome = result.data?.value;
-  const find = (at: Date | null = departure) => {
+  const find = (at: Date | null = departure, force = false) => {
     setPlanError(null);
+    setSelectedId(null);
+    setResultsView(true);
     if (!effectiveOrigin) {
       if (useLocation) {
         location.request();
-        setPlanError("A helyzeted még nem érhető el. Engedélyezd a helyhozzáférést, vagy válassz kiindulópontot.");
-        setResultsView(true);
+        setPlanError(t.plannerLocationError);
       }
       return;
     }
-    if (!destination) return;
-    if (distanceMeters(effectiveOrigin.position, destination.position) < 50) {
-      setPlanError("Válassz a kiindulóponttól távolabbi célt.");
-      setResultsView(true);
+    const current = form(effectiveOrigin, at);
+    if (!current || !destination) return;
+    const inHungary = (p: GeoPoint) => p.lat >= 45.7 && p.lat <= 48.6 && p.lon >= 16.1 && p.lon <= 22.9;
+    if (!inHungary(effectiveOrigin.position) || !inHungary(destination.position)) {
+      session.cancelWarmup();
+      setPlanRequest(null);
+      setPlanError(t.plannerOutsideArea);
       return;
     }
-    if (at && at.getTime() < Date.now() - 60_000) {
-      setPlanError("A megadott indulási idő elmúlt. Válassz későbbi időpontot, vagy indulj most.");
-      setResultsView(true);
+    if (distanceMeters(effectiveOrigin.position, destination.position) < 25) {
+      session.cancelWarmup();
+      setPlanRequest(null);
+      setPlanError(t.plannerSamePlace);
       return;
     }
-    setSelectedId(null);
-    setResultsView(true);
-    setPlanRequest({ from: effectiveOrigin, to: destination, at: at ?? new Date(), id: Date.now() });
+    if (at && at.getTime() < Date.now()) {
+      session.cancelWarmup();
+      setPlanRequest(null);
+      setPlanError(t.plannerDeparturePassed);
+      return;
+    }
+    setPlanRequest({ from: effectiveOrigin, to: destination, form: current, force, id: Date.now() });
   };
+  // PlannerScreen.kt: setDeparture(±15 min) then plan(); the plan replaces the just-scheduled prefetch.
   const shift = (minutes: number) => {
     const base = departure ?? new Date(outcome?.readyAt ?? Date.now());
     const next = new Date(base.getTime() + minutes * 60_000);
@@ -201,12 +248,16 @@ export function PlannerScreen({
         active={active}
         field={editing}
         userPosition={location.position}
-        onBack={() => setEditing(null)}
+        onBack={() => {
+          setEditing(null);
+          changed();
+        }}
         onCurrent={() => {
           setUseLocation(true);
           setOrigin(null);
           location.request();
           setEditing(null);
+          changed();
         }}
         onChoose={(endpoint) => {
           if (editing === "origin") {
@@ -214,6 +265,7 @@ export function PlannerScreen({
             setUseLocation(false);
           } else setDestination(endpoint);
           setEditing(null);
+          changed();
         }}
       />
     );
@@ -223,6 +275,8 @@ export function PlannerScreen({
     setOrigin(destination);
     setDestination(effectiveOrigin);
     setUseLocation(false);
+    setPlanRequest(null);
+    changed();
   };
 
   const findButton = (
@@ -230,7 +284,7 @@ export function PlannerScreen({
       <button
         type="button"
         className="button button-filled button-block button-tall"
-        disabled={(!effectiveOrigin && !useLocation) || !destination || result.loading}
+        disabled={(!effectiveOrigin && !useLocation) || !destination || planning}
         onClick={() => find()}
       >
         <Icon name="route" size={20} />
@@ -247,7 +301,11 @@ export function PlannerScreen({
       departure={departure}
       onClose={() => setPickerOpen(false)}
       onConfirm={(value) => {
-        setDeparture(value);
+        if (value?.getTime() !== departure?.getTime()) {
+          setDeparture(value);
+          setPlanRequest(null);
+          changed();
+        }
         setPickerOpen(false);
       }}
     />
@@ -287,23 +345,18 @@ export function PlannerScreen({
     );
 
   if (resultsView) {
-    const planning = result.loading;
     const itineraries = outcome?.itineraries ?? [];
     const error =
       planError ??
-      (result.error
-        ? "Az útvonaltervezés átmenetileg nem érhető el. Ellenőrizd a kapcsolatot, és próbáld újra."
-        : outcome && !itineraries.length
-          ? "A megadott időpontban nem találtunk megfelelő útvonalat. Próbálj másik időpontot vagy kiindulópontot."
-          : null);
+      (result.error ? t.plannerUnavailable : outcome && !itineraries.length ? t.plannerNoRoute : null);
     const base = departure ?? new Date(outcome?.readyAt ?? now);
     return (
       <div className="fullscreen-layer page planner-results" role="dialog" aria-modal="true" aria-label={t.plannerTitle}>
         <PageHeader
           title={t.plannerTitle}
-          onBack={() => setResultsView(false)}
+          onBack={closeResults}
           actions={
-            <CookieIconButton label="Újratervezés" size={48} disabled={planning} onClick={() => find()}>
+            <CookieIconButton label={t.plannerRefresh} size={48} disabled={planning} onClick={() => find(departure, true)}>
               <Icon name="refresh" className={planning ? "spinning" : ""} />
             </CookieIconButton>
           }
@@ -350,12 +403,7 @@ export function PlannerScreen({
             {error && !planning && <div className="planner-error t-body-medium">{error}</div>}
             {outcome && itineraries.length > 0 && !planning && (
               <>
-                {outcome.partial && (
-                  <p className="t-body-medium on-variant">
-                    Egyes menetrendek vagy gyalogos kapcsolatok most nem érhetők el, ezért további útvonalak is
-                    lehetségesek. Próbálj újratervezni.
-                  </p>
-                )}
+                {outcome.partial && <p className="t-body-medium on-variant">{t.plannerPartial}</p>}
                 <div>
                   <h2 className="t-title-large-emphasized">Útvonalak</h2>
                   <p className="t-body-small on-variant">
@@ -468,11 +516,6 @@ export function PlannerScreen({
         }
       >
         <p>{t.plannerLocalServicesDetail}</p>
-        <p className="notice">
-          A Worker jelenleg a BKK által ismert járatokkal tervez. A helyi
-          szolgáltatók beállítása ezen az eszközön megmarad, de a külön helyi
-          menetrendek még nem részei a webes tervezésnek.
-        </p>
         <div className="service-list">
           {LOCAL_PROVIDERS.map((provider) => {
             const checked = preferences.localProviders.includes(provider.id);
@@ -487,6 +530,8 @@ export function PlannerScreen({
                   aria-label={provider.name}
                   onChange={(event) => {
                     const enabled = (event.target as HTMLInputElement).checked;
+                    setPlanRequest(null);
+                    changed();
                     preferences.update({
                       localProviders: enabled
                         ? [

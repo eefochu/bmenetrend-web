@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { Icon, PageHeader } from "~/components/ui";
 import { serviceStyle } from "~/lib/transit/badges";
 import { serviceTypeLabel } from "~/lib/transit/labels";
@@ -6,6 +6,8 @@ import { clock, type Itinerary, type Leg, type Route } from "~/lib/transit/model
 import { transfers, travelLegs } from "~/lib/transit/planner";
 import { RouteBadge } from "./line-badge";
 import { PlatformBadge } from "./transit-components";
+import { DisruptionNotice } from "./disruption-notice";
+import { itineraryContexts } from "~/lib/transit/disruptions";
 
 /** Port of ui/JourneyComponents.kt: ItineraryCard, JourneyBar and JourneyDetail. */
 
@@ -75,8 +77,17 @@ export function ItineraryCard({
   const legs = travelLegs(trip);
   const walkMinutes = legs.filter(walking).reduce((sum, leg) => sum + legMinutes(leg), 0);
   const changes = transfers(trip);
+  const contexts = useMemo(() => itineraryContexts(trip), [trip]);
+  // The whole card opens the journey; the disruption notice inside it opens its own details.
   return (
-    <button type="button" className={`itinerary-card${recommended ? " itinerary-recommended" : ""}`} onClick={onClick}>
+    <div className={`itinerary-card${recommended ? " itinerary-recommended" : ""}`} onClick={onClick}>
+      <span onClick={(event) => event.stopPropagation()}>
+        <DisruptionNotice contexts={contexts} />
+      </span>
+      <button type="button" className="itinerary-card-main" onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}>
       <JourneyBar trip={trip} ready={ready} />
       <span className="itinerary-legs">
         {legs.map((leg, index) => (
@@ -111,7 +122,8 @@ export function ItineraryCard({
       {trip.start < now - 30_000 && (
         <span className="t-label-medium error-text">Az indulási idő elmúlt · tervezz újra</span>
       )}
-    </button>
+      </button>
+    </div>
   );
 }
 
@@ -249,6 +261,7 @@ export function JourneyDetail({
 }) {
   const legs = travelLegs(trip);
   const colors = legs.map(movementColor);
+  const contexts = useMemo(() => itineraryContexts(trip), [trip]);
   const wait = "var(--md-sys-color-outline-variant)";
   const initialWait = clockMinutes(readyAt, trip.start);
   return (
@@ -271,6 +284,7 @@ export function JourneyDetail({
               <span className="error-text">Ez az út már elkezdődött. Indulás előtt tervezz újra.</span>
             )}
           </section>
+          <DisruptionNotice contexts={contexts} className="journey-notice" />
           <div className="journey-timeline">
             {trip.start - readyAt >= 60_000 && initialWait > 0 && (
               <>
@@ -327,5 +341,6 @@ export function JourneyDetail({
   );
 }
 
+/** planner_source */
 export const PLANNER_SOURCE =
-  "Útvonaltervezés: BKK FUTÁR, kiegészítve az országos EMMA/MÁVPlusz tervezővel. Csak az élőként jelzett szakaszok használnak valós idejű előrejelzést.";
+  "Országos járatok és gyalogos kapcsolatok: EMMA/MÁVPlusz. Helyi menetrendek: ViaBusz, KanyarGO és HOMM. Csak az élőként jelzett szakaszok használnak valós idejű előrejelzést.";

@@ -125,6 +125,33 @@ test("native sprite layers validate, omit station labels and don't re-upload sto
         (layer) => layer.id === "bm-stops-rail" && layer.minzoom === 9,
       ),
     ).toBe(true);
+    // TransitMapVisibility: road vehicles from the stop gate (14), trains overview 7–14 only.
+    const layer = (id: string) => layers.find((entry) => entry.id === id)!;
+    expect([layer("bm-vehicles").minzoom, layer("bm-vehicles").maxzoom]).toEqual([14, 24]);
+    expect([layer("bm-headings").minzoom, layer("bm-headings").maxzoom]).toEqual([14, 24]);
+    expect([layer("bm-vehicles-overview").minzoom, layer("bm-vehicles-overview").maxzoom]).toEqual([7, 14]);
+    expect([layer("bm-headings-overview").minzoom, layer("bm-headings-overview").maxzoom]).toEqual([7, 14]);
+    // Unfocused vehicles and arrows: a zoom step to 0.7× below 15, not an interpolation.
+    const size = (id: string) => (layer(id).layout as Record<string, unknown>)["icon-size"];
+    expect(size("bm-vehicles")).toEqual([
+      "step", ["zoom"],
+      ["case", ["get", "selected"], (30 / 36) * 0.7, (26 / 36) * 0.7],
+      15,
+      ["case", ["get", "selected"], 30 / 36, 26 / 36],
+    ]);
+    expect(size("bm-headings")).toEqual([
+      "step", ["zoom"],
+      ["case", ["get", "selected"], (30 / 18) * 0.7, (26 / 18) * 0.7],
+      15,
+      ["case", ["get", "selected"], 30 / 18, 26 / 18],
+    ]);
+    // Route → stations → vehicles: every vehicle layer above every station layer.
+    const order = layers.map((entry) => entry.id as string);
+    const lastStation = Math.max(order.indexOf("bm-stops"), order.indexOf("bm-stops-rail"), order.indexOf("bm-station-arrow"));
+    expect(order.indexOf("bm-focus")).toBeLessThan(lastStation);
+    for (const id of ["bm-vehicles-overview", "bm-headings-overview", "bm-headings", "bm-vehicles"])
+      expect(order.indexOf(id)).toBeGreaterThan(lastStation);
+    expect(order.indexOf("bm-vehicles")).toBe(order.length - 1);
     const style = {
       version: 8,
       sources: Object.fromEntries(
@@ -150,6 +177,10 @@ test("native sprite layers validate, omit station labels and don't re-upload sto
       },
     ]);
     expect(layers.find((layer) => layer.id === STOP_LAYER)?.minzoom).toBe(0);
+    // A highlighted line: its vehicles from zoom 0, always full size; the overview trains step aside.
+    expect(layer("bm-vehicles").minzoom).toBe(0);
+    expect(size("bm-vehicles")).toEqual(["case", ["get", "selected"], 30 / 36, 26 / 36]);
+    expect((layer("bm-vehicles-overview").layout as Record<string, unknown>).visibility).toBe("none");
     // setStyle drops sources, layers and images; a dark theme must restore all of them.
     sources.clear();
     layers.length = 0;

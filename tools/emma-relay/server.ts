@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import {
   OFFICIAL_EMMA_URL,
   EMMA_QUERIES,
+  PLAN_OPERATIONS,
+  WALK_OPERATIONS,
   type EmmaOperation,
 } from "../../src/lib/transit/emma-contract";
 
@@ -26,6 +28,17 @@ const TTL: Record<EmmaOperation, number> = {
   trip: 30_000,
   plan: 15_000,
   planWalkAverse: 15_000,
+  planBus: 15_000,
+  planWalkAverseBus: 15_000,
+  // Street walks do not change within a session; the browser keeps its own 60-day store too.
+  walk1: 600_000,
+  walk2: 600_000,
+  walk3: 600_000,
+  walk4: 600_000,
+  walk5: 600_000,
+  walk6: 600_000,
+  walk7: 600_000,
+  walk8: 600_000,
 };
 const MAX_BODY = 16_384,
   MAX_REPLY = 2_000_000;
@@ -33,6 +46,9 @@ const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+
+const isPlan = (operation: EmmaOperation) => (PLAN_OPERATIONS as readonly string[]).includes(operation);
+const isWalk = (operation: EmmaOperation) => (WALK_OPERATIONS as readonly string[]).includes(operation);
 
 export function validateOperation(
   query: unknown,
@@ -50,9 +66,15 @@ export function validateOperation(
         ? ["name"]
         : operation === "board"
           ? ["id", "range", "start"]
-          : operation === "plan" || operation === "planWalkAverse"
+          : isPlan(operation)
             ? ["date", "from", "time", "to"]
-            : ["id"];
+            : isWalk(operation)
+              ? [
+                  "date",
+                  ...Array.from({ length: Number(operation.slice(4)) }, (_, i) => [`from${i}`, `to${i}`]).flat(),
+                  "time",
+                ].sort()
+              : ["id"];
   if (Object.keys(variables).sort().join(",") !== expected.join(","))
     throw new Error("Invalid variables");
   if (operation === "vehicles" || operation === "stops") {
@@ -86,9 +108,10 @@ export function validateOperation(
       variables.name.length > 100)
   )
     throw new Error("Invalid search text");
-  if (operation === "plan" || operation === "planWalkAverse") {
+  if (isPlan(operation) || isWalk(operation)) {
     // Coordinates only (no place names), inside Hungary; a local date and time near today.
-    for (const field of ["from", "to"] as const) {
+    const fields = isPlan(operation) ? ["from", "to"] : Object.keys(variables).filter((key) => /^(?:from|to)\d$/.test(key));
+    for (const field of fields) {
       const match =
         typeof variables[field] === "string"
           ? /^(-?\d{1,2}(?:\.\d{1,8})?),(-?\d{1,3}(?:\.\d{1,8})?)$/.exec(variables[field])
@@ -266,7 +289,7 @@ export function createEmmaRelay({
           // EMMA's national planner routinely needs 8–10 s; other queries keep the short limit.
           timer = setTimeout(
             () => controller.abort(),
-            operation === "plan" || operation === "planWalkAverse" ? 20_000 : 6000,
+            isPlan(operation) || isWalk(operation) ? 20_000 : 6000,
           );
         try {
           const upstream = await upstreamFetch(OFFICIAL_EMMA_URL, {

@@ -121,6 +121,17 @@ export const t = {
     "Az EMMA országos útvonalai mellett ezeknek a szolgáltatóknak az ellenőrzött helyi menetrendjeit is használjuk. Átszállással kombinált útvonalakat is keresünk.", // planner_local_services_detail
   plannerLocalServicesDone: "Kész", // planner_local_services_done
   plannerFind: "Mutasd az útvonalakat", // planner_find
+  plannerRefresh: "Újratervezés", // planner_refresh
+  plannerLocationError:
+    "A helyzeted még nem érhető el. Engedélyezd a helyhozzáférést, vagy válassz kiindulópontot.", // planner_location_error
+  plannerOutsideArea: "A tervezés Magyarországon érhető el. Válassz magyarországi kiindulópontot és célt.", // planner_outside_area
+  plannerSamePlace: "Válassz a kiindulóponttól távolabbi célt.", // planner_same_place
+  plannerDeparturePassed: "A megadott indulási idő elmúlt. Válassz későbbi időpontot, vagy indulj most.", // planner_departure_passed
+  plannerNoRoute:
+    "A megadott időpontban nem találtunk megfelelő útvonalat. Próbálj másik időpontot vagy kiindulópontot.", // planner_no_route
+  plannerUnavailable: "Az útvonaltervezés átmenetileg nem érhető el. Ellenőrizd a kapcsolatot, és próbáld újra.", // planner_unavailable
+  plannerPartial:
+    "Egyes menetrendek vagy gyalogos kapcsolatok most nem érhetők el, ezért további útvonalak is lehetségesek. Próbálj újratervezni.", // planner_partial
   plannerNoPlaces: "Nincs találat. Próbálj pontosabb nevet megadni.", // planner_no_places
   plannerSearchError:
     "A helykeresés nem érhető el. Próbálj megállónévre keresni, vagy ellenőrizd a kapcsolatot.", // planner_search_error

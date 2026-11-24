@@ -1,4 +1,5 @@
-import { emmaBoard, emmaTrip, isVolanId } from "./emma";
+import { emmaBoard, emmaTrip, isVolanId, railNumber } from "./emma";
+import { budapestParts, itinerary, routerLegKey } from "./planning/core";
 import type { GeoPoint } from "~/lib/places";
 import {
   appStopId,
@@ -6,13 +7,11 @@ import {
   object,
   number,
   string,
-  color,
   parseRoutes,
   parseRoute,
   parseStop,
   parseVehicle,
   polyline,
-  position,
   type Row,
   type Snapshot,
   type Stop,
@@ -34,6 +33,7 @@ const TTL: Record<string, number> = {
   "trip-details": 30_000,
   "route-details": 30_000,
   "plan-trip": 5_000,
+  "service-disruptions": 60_000,
   "arrivals-and-departures-for-stop": 10_000,
   "arrivals-and-departures-for-stops": 10_000,
 };
@@ -61,6 +61,15 @@ export const message = (error: unknown) =>
     ? error.message
     : "A közlekedési adatok nem érhetők el.";
 const abort = () => new DOMException("Megszakítva", "AbortError");
+/** Forget cached answers, budgets and a Retry-After cooldown (tests; nothing in the app calls this). */
+export function resetTransport() {
+  cache.clear();
+  cacheSize = 0;
+  pending.clear();
+  requests = [];
+  plans = [];
+  cooldown = 0;
+}
 /** Planner calls the client budget still allows this minute (BkkWorkerRepository.planHeadroom). */
 export function planHeadroom() {
   const now = Date.now();
@@ -69,6 +78,7 @@ export function planHeadroom() {
 
 /** Map/nearby polling: kept below the full budget so taps on stops, trips and lines always have headroom. */
 const BACKGROUND = new Set([
+  "service-disruptions",
   "stops-for-location",
   "vehicles-for-location",
   "arrivals-and-departures-for-stops",
@@ -169,12 +179,11 @@ export async function request(
             `A közlekedési szolgáltató nem érhető el (${response.status}).`,
           );
         const json = object(await response.json());
+        // service-disruptions has its own envelope: two feeds, each with its own timestamp.
         if (
           json.status !== "OK" ||
-          !json.data ||
-          typeof json.data !== "object" ||
-          Array.isArray(json.data) ||
-          !number(json.currentTime)
+          (endpoint !== "service-disruptions" &&
+            (!json.data || typeof json.data !== "object" || Array.isArray(json.data) || !number(json.currentTime)))
         )
           throw new TransitError("A szolgáltató hibás választ adott.");
         const size = JSON.stringify(json).length;
@@ -285,7 +294,8 @@ export async function routeVehicles(
 ): Promise<Snapshot<Vehicle[]>> {
   const root = await request(
     "vehicles-for-route",
-    { routeId, includeReferences: "routes,trips" },
+    // BkkWorkerRepository.routeVehicles: the same parameters as search's line vehicles, so both share one cache entry.
+    { routeId, includeReferences: "routes" },
     signal,
   );
   const routes = parseRoutes(refs(root));
@@ -550,6 +560,30 @@ function boardRows(root: Row, stop: Stop): Departure[] {
     .sort((a, b) => a.expected - b.expected);
   return rows;
 }
+/** BkkWorkerParser.workerTripId: trips the Worker serves (BKK and Volán); MÁV `emma:` trips use EMMA directly. */
+export const isWorkerTripId = (tripId: string) =>
+  /^BKK_./.test(tripId) || /^volan_[A-Za-z0-9_.-]+$/.test(tripId);
+
+/**
+ * BkkWorkerRepository.tripVehicle: the live vehicle running [tripId] now, from the same `trip-details`
+ * request (and cache entry) the trip view uses. Null before the trip starts or when the vehicle the
+ * Worker reports runs another trip.
+ */
+export async function tripVehicle(
+  tripId: string,
+  signal: AbortSignal,
+): Promise<Vehicle | null> {
+  if (!isWorkerTripId(tripId)) return null;
+  const root = await request(
+    "trip-details",
+    { tripId, includeReferences: "routes,trips,stops" },
+    signal,
+  );
+  const row = object(object(object(root.data).entry).vehicle);
+  if (!Object.keys(row).length) return null;
+  const vehicle = parseVehicle(row, parseRoutes(refs(root)));
+  return vehicle?.tripId === tripId ? vehicle : null;
+}
 export async function tripDetails(
   tripId: string,
   signal: AbortSignal,
@@ -595,106 +629,178 @@ export async function tripDetails(
   });
 }
 export type PlanEndpoint = { name: string; position: GeoPoint };
+
+/** BkkWorkerParser.PlanResult: [rejected] counts itineraries the app cannot show faithfully (EMMA is needed). */
+export type BkkPlanResult = { itineraries: Itinerary[]; rejected: number; offered: number; fetchedAt: number };
+export type BkkPlanMode = "TRANSIT,WALK" | "BUS,COACH,WALK" | "WALK";
+
+const BKK_MODES = new Set(["BUS", "TRAM", "TROLLEYBUS", "SUBWAY"]);
+const BKK_SPECIAL_MODES = new Set(["COACH", "FERRY", "CABLE_CAR", "FUNICULAR"]);
+const PLAN_MODES = new Set([
+  "WALK", "BUS", "COACH", "TRAM", "TROLLEYBUS", "SUBWAY", "RAIL", "SUBURBAN_RAILWAY", "TRAMTRAIN", "FERRY", "CABLE_CAR", "FUNICULAR",
+]);
+const isTrainMode = (mode: string) => mode === "RAIL" || mode === "TRAMTRAIN" || mode === "TRAIN";
+/** HevSupport.number */
+export function hevNumber(short: string, long: string) {
+  return [long, short].map((value) => value.trim()).find((value) => /^H[5-9](?:A|E)?$/i.test(value))?.toUpperCase();
+}
+export const HEV_COLORS: Record<string, string> = { "5": "#7B116B", "6": "#824B00", "7": "#EF7800" };
+
+/**
+ * BkkWorkerParser.planRoute: a planner leg's line. BKK lines keep their identity (rail/HÉV by mode), Volán
+ * lines keep BKK's raw agency ID under the Volán provider, other agencies are genuinely unsupported (null).
+ */
+export function planRoute(raw: string, mode: string, short: string, long: string, routeColor: string) {
+  const shown = short && !short.includes("<") && !/[\uE000-\uF8FF]/.test(short) ? short : "";
+  const safe = /^[a-f\d]{6}$/i.test(routeColor) ? `#${routeColor}` : "";
+  if (/^volan_[A-Za-z0-9_.-]+$/.test(raw)) {
+    if (mode !== "BUS" && mode !== "COACH") return null;
+    const number = shown || long;
+    return number ? { id: raw, provider: "volan", name: number, color: safe || "#F9B900" } : null;
+  }
+  if (!raw.startsWith("BKK_") || raw.length <= 4) return null;
+  if (BKK_MODES.has(mode)) return shown ? { id: raw, provider: "bkk", name: shown, color: safe || "#199DCF" } : null;
+  if (mode === "SUBURBAN_RAILWAY") {
+    const number = hevNumber(shown, long);
+    return number ? { id: raw, provider: "hev", name: number, color: HEV_COLORS[number[1]!] ?? "#EB6482" } : null;
+  }
+  if (isTrainMode(mode)) return { id: raw, provider: "mav", name: railNumber(shown, long), color: "#0066AA" };
+  if (!BKK_SPECIAL_MODES.has(mode)) return null;
+  const number = shown || long;
+  return number ? { id: raw, provider: "bkk", name: number, color: safe || "#199DCF" } : null;
+}
+
+const planPoint = (row: Row) => {
+  const lat = row.lat,
+    lon = row.lon;
+  if (typeof lat !== "number" || typeof lon !== "number" || lat < 45 || lat > 49.5 || lon < 15.5 || lon > 23.5)
+    throw new Error("Hibás pont");
+  const name = string(row.name);
+  if (!name) throw new Error("Névtelen pont");
+  return { name, position: { lat, lon }, platform: string(row.platformCode) || undefined };
+};
+
+function planLeg(row: Row): Leg {
+  const mode = string(row.mode);
+  if (!PLAN_MODES.has(mode)) throw new Error("Ismeretlen mód");
+  // Planner timestamps are milliseconds.
+  const start = row.startTime,
+    end = row.endTime,
+    distance = row.distance;
+  if (typeof start !== "number" || typeof end !== "number" || typeof distance !== "number" || end < start || !(distance >= 0))
+    throw new Error("Hibás szakasz");
+  if (mode === "WALK" && Math.floor((end - start) / 1000) + 10 < distance / 2.2) throw new Error("Hibás séta");
+  const route =
+    mode === "WALK"
+      ? null
+      : planRoute(string(row.routeId), mode, string(row.routeShortName), string(row.routeLongName), string(row.routeColor));
+  if (mode !== "WALK" && !route) throw new Error("Nem támogatott járat");
+  const from = planPoint(object(row.from)),
+    to = planPoint(object(row.to));
+  const stops = array(row.intermediateStops).map((value) => planPoint(object(value)));
+  return {
+    routeId: route?.id,
+    provider: route?.provider,
+    mode,
+    name: route?.name ?? "",
+    color: route?.color ?? "#536171",
+    from: from.name,
+    to: to.name,
+    fromPosition: from.position,
+    toPosition: to.position,
+    fromPlatform: from.platform,
+    toPlatform: to.platform,
+    headsign: string(row.headsign) || undefined,
+    distance,
+    stayOnBoard: row.interlineWithPreviousLeg === true,
+    start,
+    end,
+    live: row.realTime === true,
+    geometry: [from, ...stops, to].map((point) => [point.position.lon, point.position.lat] as [number, number]),
+    intermediate: stops.map((stop) => stop.name),
+    source: "BKK API",
+    tripId: string(row.tripId) || undefined,
+    serviceDate: /^\d{8}$/.test(string(row.serviceDate)) ? string(row.serviceDate) : undefined,
+  };
+}
+
+/** BkkWorkerParser.planResult: BKK's OTP itineraries, validated by the same feasibility rules as EMMA's. */
+export function parsePlan(root: Row, ready: number, fetchedAt?: number): BkkPlanResult {
+  const entry = object(object(root.data).entry);
+  if (entry.error !== undefined && entry.error !== null) throw new TransitError("A BKK útvonaltervező hibát adott.");
+  const rows = array(object(entry.plan).itineraries);
+  let rejected = 0;
+  const seen = new Set<string>();
+  const itineraries = rows.flatMap((value, index) => {
+    let legs: Leg[];
+    try {
+      const raw = array(object(value).legs);
+      if (raw.length < 1 || raw.length > 40) throw new Error("Szakaszok");
+      legs = raw.map((leg) => planLeg(object(leg)));
+    } catch {
+      rejected++;
+      return [];
+    }
+    const keys = legs.map(routerLegKey);
+    const journey = `bkk:${ready}:${index}:${keys.join("|")}`;
+    const routed = legs.map((leg, i) => ({ ...leg, routerJourney: journey, routerPrevious: keys[i - 1] }));
+    // Merely infeasible journeys are not "rejected": EMMA would apply the same rule.
+    const trip = itinerary(routed, ready, fetchedAt);
+    if (!trip || seen.has(trip.id)) return [];
+    seen.add(trip.id);
+    return [trip];
+  });
+  return { itineraries, rejected, offered: rows.length, fetchedAt: fetchedAt ?? Date.now() };
+}
+
+const coordinate = (value: number) => value.toFixed(5);
+/** BkkWorkerRepository.place */
+function placeParam(name: string, position: GeoPoint) {
+  const label =
+    name
+      .replace(/::/g, " ")
+      .replace(/[\u0000-\u001f]/g, "")
+      .trim()
+      .slice(0, 120) || "Hely";
+  return `${label}::${coordinate(position.lat)},${coordinate(position.lon)}`;
+}
+
+/** BkkWorkerRepository.planResult / walking: one Worker `plan-trip` (compact, as Android asks for it). */
+export async function bkkPlan(
+  from: PlanEndpoint,
+  to: PlanEndpoint,
+  ready: number,
+  mode: BkkPlanMode,
+  signal: AbortSignal,
+): Promise<BkkPlanResult> {
+  const parts = budapestParts(ready);
+  const root = await request(
+    "plan-trip",
+    {
+      fromPlace: placeParam(from.name, from.position),
+      toPlace: placeParam(to.name, to.position),
+      mode,
+      date: `${parts.year}-${parts.month}-${parts.day}`,
+      time: `${parts.hour}:${parts.minute}`,
+      numItineraries: mode === "WALK" ? "1" : "3",
+      showIntermediateStops: "true",
+      includeReferences: "false",
+      compact: "true",
+    },
+    signal,
+  );
+  return parsePlan(root, ready, number(root.currentTime) || Date.now());
+}
+
+/** Compatibility wrapper: BKK's answer as a snapshot (rejected rows mark it incomplete). */
 export async function planTrip(
   from: PlanEndpoint,
   to: PlanEndpoint,
   at: Date,
   signal: AbortSignal,
 ): Promise<Snapshot<Itinerary[]>> {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Europe/Budapest",
-      hourCycle: "h23",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    })
-      .formatToParts(at)
-      .map((part) => [part.type, part.value]),
-  );
-  const place = (point: PlanEndpoint) =>
-    `${point.name.replace(/::/g, " ")}::${point.position.lat},${point.position.lon}`;
-  const root = await request(
-    "plan-trip",
-    {
-      fromPlace: place(from),
-      toPlace: place(to),
-      mode: "TRANSIT,WALK",
-      date: `${parts.year}-${parts.month}-${parts.day}`,
-      time: `${parts.hour}:${parts.minute}`,
-      numItineraries: "3",
-      showIntermediateStops: "true",
-      includeReferences: "false",
-    },
-    signal,
-  );
-  const entry = object(object(root.data).entry);
-  if (entry.error)
-    throw new TransitError(
-      "Nem található útvonal a megadott helyek és időpont között.",
-    );
-  let rejected = false;
-  const itineraries = array(object(entry.plan).itineraries).flatMap(
-    (value, index) => {
-      const row = object(value);
-      try {
-        const legs: Leg[] = array(row.legs).map((value) => {
-          const leg = object(value),
-            start = number(leg.startTime),
-            end = number(leg.endTime);
-          if (!start || end < start || !string(leg.mode))
-            throw new Error("Hibás szakasz");
-          const from = object(leg.from),
-            to = object(leg.to);
-          return {
-            routeId: string(leg.routeId),
-            mode: string(leg.mode),
-            name: string(leg.routeShortName) || string(leg.route),
-            color: color(leg.routeColor),
-            from: string(from.name),
-            to: string(to.name),
-            fromPosition: position(from) ?? undefined,
-            toPosition: position(to) ?? undefined,
-            fromPlatform: string(from.platformCode) || undefined,
-            toPlatform: string(to.platformCode) || undefined,
-            headsign: string(leg.headsign) || undefined,
-            distance: number(leg.distance),
-            stayOnBoard: leg.interlineWithPreviousLeg === true,
-            start,
-            end,
-            live: leg.realTime === true,
-            geometry: polyline(string(object(leg.legGeometry).points)),
-            intermediate: array(leg.intermediateStops).map((stop) =>
-              string(object(stop).name),
-            ),
-            source: "BKK API" as const,
-          };
-        });
-        if (
-          !legs.length ||
-          legs.some((leg, i) => i > 0 && leg.start < legs[i - 1]!.end)
-        )
-          throw new Error("Hibás átszállás");
-        return [
-          {
-            id: `${number(row.startTime)}:${index}`,
-            start: legs[0]!.start,
-            end: legs.at(-1)!.end,
-            walkMeters: number(row.walkDistance),
-            legs,
-          },
-        ];
-      } catch {
-        rejected = true;
-        return [];
-      }
-    },
-  );
-  const result = snapshot(root, itineraries);
-  result.incomplete ||= rejected;
-  return result;
+  const result = await bkkPlan(from, to, at.getTime(), "TRANSIT,WALK", signal);
+  return { value: result.itineraries, at: result.fetchedAt, incomplete: result.rejected > 0, fallbackUnavailable: false };
 }
 const STOP_KEY = "bmenetrend:stop-catalogue:v1";
 let catalogue: Map<string, Stop> | undefined;

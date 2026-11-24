@@ -15,7 +15,7 @@ import {
   type Journey,
 } from "./model";
 
-import { OFFICIAL_EMMA_URL, EMMA_QUERIES } from "./emma-contract";
+import { OFFICIAL_EMMA_URL, EMMA_QUERIES, PLAN_OPERATIONS, WALK_OPERATIONS } from "./emma-contract";
 
 // Public build-time configuration. The frontend itself remains a static export.
 function endpoint() {
@@ -24,14 +24,21 @@ function endpoint() {
   return OFFICIAL_EMMA_URL;
 }
 export const EMMA_URL = endpoint();
-const cache = new Map<string, { data: Row; at: number; expires: number }>();
+type EmmaResult = { data: Row; at: number; expires: number; errors: Row[] };
+const cache = new Map<string, EmmaResult>();
 let blockedUntil = 0;
 
 /** EMMA's national planner routinely needs 8–10 s; other queries answer within a few seconds. */
-const timeoutFor = (query: string) =>
-  query === EMMA_QUERIES.plan || query === EMMA_QUERIES.planWalkAverse ? 22_000 : 8000;
+const SLOW_QUERIES = new Set<string>([...PLAN_OPERATIONS, ...WALK_OPERATIONS].map((name) => EMMA_QUERIES[name]));
+const timeoutFor = (query: string) => (SLOW_QUERIES.has(query) ? 22_000 : 8000);
 
-async function emmaFetch(query: string, variables: Row, ttl: number, signal: AbortSignal) {
+async function emmaFetch(
+  query: string,
+  variables: Row,
+  ttl: number,
+  signal: AbortSignal,
+  partial: boolean,
+): Promise<EmmaResult> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
   signal.addEventListener("abort", cancel, { once: true });
@@ -56,9 +63,10 @@ async function emmaFetch(query: string, variables: Row, ttl: number, signal: Abo
       // A rejected or failed request is about this request only; 5xx may succeed on a retry.
       throw new EmmaError(`Az EMMA nem érhető el (${response.status}).`, response.status >= 500);
     const json = object(await response.json());
-    if (array(json.errors).length || !json.data)
+    // Aliased batches (street walks) report per-alias errors next to the others' data.
+    if ((array(json.errors).length && !partial) || !json.data || typeof json.data !== "object")
       throw new EmmaError("Az EMMA nem tudta teljesíteni a kérést.", false);
-    return { data: object(json.data), at: Date.now(), expires: Date.now() + ttl };
+    return { data: object(json.data), at: Date.now(), expires: Date.now() + ttl, errors: array(json.errors).map(object) };
   } catch (error) {
     if (signal.aborted) throw new DOMException("Megszakítva", "AbortError");
     if (error instanceof EmmaError) throw error;
@@ -96,7 +104,8 @@ export async function emmaQuery(
   variables: Row,
   ttl: number,
   signal: AbortSignal,
-) {
+  options: { partial?: boolean } = {},
+): Promise<EmmaResult> {
   if (signal.aborted) throw new DOMException("Megszakítva", "AbortError");
   const key = JSON.stringify([query, variables]),
     cached = cache.get(key);
@@ -105,17 +114,21 @@ export async function emmaQuery(
     throw new Error(
       "A MÁV/EMMA adatai ebben a böngészőben nem érhetők el. A BKK adatai továbbra is használhatók.",
     );
+  const partial = options.partial === true;
   let result;
   try {
-    result = await emmaFetch(query, variables, ttl, signal);
+    result = await emmaFetch(query, variables, ttl, signal, partial);
   } catch (error) {
     if (!(error instanceof EmmaError) || !error.transient || signal.aborted) throw error;
     await new Promise((resolve) => setTimeout(resolve, error.retryAfter));
     if (signal.aborted) throw new DOMException("Megszakítva", "AbortError");
-    result = await emmaFetch(query, variables, ttl, signal);
+    result = await emmaFetch(query, variables, ttl, signal, partial);
   }
-  cache.set(key, result);
-  while (cache.size > 30) cache.delete(cache.keys().next().value!);
+  // A partly failed batch is not a cacheable answer.
+  if (!result.errors.length) {
+    cache.set(key, result);
+    while (cache.size > 30) cache.delete(cache.keys().next().value!);
+  }
   return result;
 }
 function snapshot<T>(value: T, at: number): Snapshot<T> {

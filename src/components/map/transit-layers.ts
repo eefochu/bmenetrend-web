@@ -6,12 +6,9 @@ import { stationOffsets, type Offset } from "./station-layout";
 
 export const STOP_LAYER = "bm-stops";
 export const VEHICLE_LAYER = "bm-vehicles";
-export const TRANSIT_HIT_LAYERS = [
-  "bm-stops",
-  "bm-stops-rail",
-  "bm-vehicles",
-  "bm-vehicles-overview",
-];
+export const STOP_LAYERS = ["bm-stops", "bm-stops-rail"] as const;
+export const VEHICLE_LAYERS = ["bm-vehicles", "bm-vehicles-overview"] as const;
+export const TRANSIT_HIT_LAYERS = [...STOP_LAYERS, ...VEHICLE_LAYERS];
 const FOCUS = "bm-focus";
 /** StopMarkerLayout.sizeStops over the 22dp sprite. */
 const STOP_SIZE: ExpressionSpecification = [
@@ -86,7 +83,8 @@ function stationSprite(
   };
   if (focused) circle(13.5, dark ? "#111D2C" : "#ffffff");
   circle(12.5, "#ffffff");
-  circle(11, focused && colors.length === 1 && routeColor ? routeColor : colors[0]!);
+  // StationSprite.kt: a multi-operator ring is white under its sectors.
+  circle(11, colors.length > 1 ? "#ffffff" : focused && routeColor ? routeColor : colors[0]!);
   if (colors.length > 1)
     colors.forEach((color, index) => {
       ctx.beginPath();
@@ -447,8 +445,19 @@ export function updateTransitLayers(
           ],
     );
   }
-  for (const overview of [true, false]) {
-    const id = overview ? "bm-headings-overview" : "bm-headings";
+  // VehicleLayers.kt: every vehicle layer sits above every station layer (a bus at a stop covers the
+  // stop), lowest first: overview trains, their arrows, arrows, icons. Trains alone use the overview
+  // layers from zoom 7 to 14 (TransitMapVisibility.TRAIN_VEHICLE_MIN_ZOOM..VEHICLE_MIN_ZOOM); from 14
+  // the main layers draw rail and road vehicles alike, at OVERVIEW_FACTOR until VEHICLE_FULL_SIZE_ZOOM.
+  // A highlighted line shows its vehicles from any zoom at full size, so the overview trains step aside.
+  const focused = lines.length > 0;
+  for (const [id, kind, overview] of [
+    [`${VEHICLE_LAYER}-overview`, "icon", true],
+    ["bm-headings-overview", "arrow", true],
+    ["bm-headings", "arrow", false],
+    [VEHICLE_LAYER, "icon", false],
+  ] as const) {
+    const arrow = kind === "arrow";
     if (!map.getLayer(id))
       map.addLayer({
         id,
@@ -456,65 +465,70 @@ export function updateTransitLayers(
         source: VEHICLE_LAYER,
         filter: [
           "all",
-          ["get", "hasHeading"],
-          overview ? ["get", "rail"] : true,
+          arrow ? ["get", "hasHeading"] : true,
+          overview ? ["==", ["get", "rail"], true] : true,
         ],
-        layout: {
-          "icon-image": ["get", "arrow"],
-          "icon-rotate": ["get", "bearing"],
-          "icon-rotation-alignment": "map",
-          "icon-pitch-alignment": "viewport",
-          "icon-allow-overlap": true,
-          "icon-ignore-placement": true,
-          "icon-size": [
-            "case",
-            ["get", "selected"],
-            (30 / 18) * (overview ? 0.7 : 1),
-            (26 / 18) * (overview ? 0.7 : 1),
-          ],
-        },
+        layout: arrow
+          ? {
+              "icon-image": ["get", "arrow"],
+              "icon-rotate": ["get", "bearing"],
+              "icon-rotation-alignment": "map",
+              "icon-pitch-alignment": "viewport",
+              "icon-allow-overlap": true,
+              "icon-ignore-placement": true,
+              "symbol-sort-key": ["case", ["get", "selected"], 1, 0],
+            }
+          : {
+              "icon-image": ["get", "icon"],
+              "icon-allow-overlap": true,
+              "icon-ignore-placement": true,
+              "icon-rotation-alignment": "viewport",
+              "icon-pitch-alignment": "viewport",
+              "symbol-sort-key": ["case", ["get", "selected"], 1, 0],
+            },
       });
     map.setLayerZoomRange(
       id,
-      overview ? 7 : lines.length ? 0 : 15,
-      overview ? 15 : 24,
+      overview ? TRAIN_VEHICLE_MIN_ZOOM : focused ? 0 : VEHICLE_MIN_ZOOM,
+      overview ? VEHICLE_MIN_ZOOM : 24,
     );
-    map.setLayoutProperty(
-      id,
-      "visibility",
-      overview && lines.length ? "none" : "visible",
-    );
+    const size = vehicleSize(arrow ? ARROW_DESIGN_DIAMETER : ICON_DIAMETER, overview, focused);
+    if (JSON.stringify(map.getLayoutProperty(id, "icon-size")) !== JSON.stringify(size))
+      map.setLayoutProperty(id, "icon-size", size);
+    map.setLayoutProperty(id, "visibility", overview && focused ? "none" : "visible");
   }
-  for (const overview of [true, false]) {
-    const id = overview ? `${VEHICLE_LAYER}-overview` : VEHICLE_LAYER;
-    if (!map.getLayer(id))
-      map.addLayer({
-        id,
-        type: "symbol",
-        source: VEHICLE_LAYER,
-        filter: overview ? ["==", ["get", "rail"], true] : true,
-        layout: {
-          "icon-image": ["get", "icon"],
-          "icon-allow-overlap": true,
-          "icon-ignore-placement": true,
-          "icon-rotation-alignment": "viewport",
-          "icon-size": [
-            "case",
-            ["get", "selected"],
-            (30 / 36) * (overview ? 0.7 : 1),
-            (26 / 36) * (overview ? 0.7 : 1),
-          ],
-        },
-      });
-    map.setLayerZoomRange(
-      id,
-      overview ? 7 : lines.length ? 0 : 15,
-      overview ? 15 : 24,
-    );
-    map.setLayoutProperty(
-      id,
-      "visibility",
-      overview && lines.length ? "none" : "visible",
-    );
-  }
+}
+
+/** TransitMapVisibility.kt: zoom gates shared with Android. */
+export const STOP_MIN_ZOOM = 14;
+export const RAIL_STOP_MIN_ZOOM = 9;
+export const VEHICLE_MIN_ZOOM = STOP_MIN_ZOOM;
+export const TRAIN_VEHICLE_MIN_ZOOM = 7;
+/** Below this, unfocused vehicles use the smaller overview marker. */
+export const VEHICLE_FULL_SIZE_ZOOM = 15;
+/** VehicleMarkerLayout.kt */
+export const VEHICLE_DIAMETER = 26;
+export const VEHICLE_SELECTED_DIAMETER = 30;
+export const OVERVIEW_FACTOR = 0.7;
+const ICON_DIAMETER = 36;
+const ARROW_DESIGN_DIAMETER = 18;
+
+export const vehicleOverview = (zoom: number, focused: boolean) =>
+  !focused && zoom < VEHICLE_FULL_SIZE_ZOOM;
+
+/** VehicleLayers.sizeExpression: a zoom step (not interpolation) to the overview size below 15. */
+export function vehicleSize(
+  design: number,
+  overviewLayer: boolean,
+  focused: boolean,
+): ExpressionSpecification {
+  const scaled = (factor: number): ExpressionSpecification => [
+    "case",
+    ["get", "selected"],
+    (VEHICLE_SELECTED_DIAMETER / design) * factor,
+    (VEHICLE_DIAMETER / design) * factor,
+  ];
+  if (overviewLayer) return scaled(OVERVIEW_FACTOR);
+  if (focused) return scaled(1);
+  return ["step", ["zoom"], scaled(OVERVIEW_FACTOR), VEHICLE_FULL_SIZE_ZOOM, scaled(1)];
 }
