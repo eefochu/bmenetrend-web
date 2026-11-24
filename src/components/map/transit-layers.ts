@@ -269,6 +269,7 @@ export function updateTransitLayers(
           description: "",
           color: "",
           textColor: "",
+          provider: vehicle.provider,
         };
         return {
           type: "Feature",

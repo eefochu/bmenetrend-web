@@ -14,6 +14,7 @@ import { mapStyleUrl, sheetPeekHeight } from "~/lib/map-config";
 import { distanceMeters } from "~/lib/places";
 import { boards, routeVehicles, stopsAt, tripVehicle, vehiclesAt, knownStops } from "~/lib/transit/client";
 import { departureVehicle } from "~/lib/transit/departure-navigation";
+import { localNetwork, localStopsNear, localVehicles, nearLocalNetwork } from "~/lib/transit/local";
 import { journeyStops } from "~/components/map/stop-directions";
 import { vehicleLineColor } from "~/lib/transit/labels";
 import {
@@ -135,6 +136,21 @@ export function MapScreen({
       keepPrevious: true,
     },
   );
+  // The local operators' stops (bundled networks) and their GPS vehicles, relayed by the Worker.
+  const localResource = useRemote(
+    "local-network",
+    async (signal) => ({ value: await localNetwork(signal), at: Date.now(), incomplete: false, fallbackUnavailable: false }),
+    { active, once: true },
+  );
+  const local = localResource.data?.value ?? null;
+  const nearLocal = nearLocalNetwork(local, area, area.radius + 2_000);
+  const localVehicleResource = useRemote("local-vehicles", localVehicles, {
+    // TransitViewModel.refreshData: every 15 s while the map shows the local area.
+    active: active && !searchOpen && nearLocal && area.zoom >= 9,
+    interval: 15_000,
+    debounce: 400,
+    keepPrevious: true,
+  });
   const now = useClock();
   const stops = useMemo(
     () =>
@@ -150,20 +166,21 @@ export function MapScreen({
                   area.radius,
               ),
               ...(stopResource.data?.value ?? []),
+              ...(local && area.zoom >= NEARBY_MIN_ZOOM ? localStopsNear(local, area, area.radius) : []),
             ].map((stop) => [stop.id, stop]),
           ).values(),
         ],
         emmaStopResource.data?.value ?? [],
       ),
-    [stopResource.data, emmaStopResource.data, area.lat, area.lon, area.radius],
+    [stopResource.data, emmaStopResource.data, local, area],
   );
   const vehicles = useMemo(
     () =>
-      mergeVehicles(
-        vehicleResource.data?.value ?? [],
-        emmaVehicleResource.data?.value ?? [],
-      ).filter((vehicle) => now - vehicle.observedAt < 180_000),
-    [vehicleResource.data, emmaVehicleResource.data, now],
+      [
+        ...mergeVehicles(vehicleResource.data?.value ?? [], emmaVehicleResource.data?.value ?? []),
+        ...(nearLocal ? (localVehicleResource.data?.value ?? []) : []),
+      ].filter((vehicle) => now - vehicle.observedAt < 180_000),
+    [vehicleResource.data, emmaVehicleResource.data, localVehicleResource.data, nearLocal, now],
   );
   const [selectedStop, setSelectedStop] = useState<Stop | null>(null);
   const [nearestStopId, setNearestStopId] = useState("");
@@ -244,7 +261,7 @@ export function MapScreen({
   // The highlighted line's own vehicles, whatever the zoom or map area (Worker-served lines only;
   // MÁV-only `emma:` lines keep the area vehicles).
   const routeVehicleResource = useRemote(
-    focusedRouteId && !focusedRouteId.startsWith("emma:") ? `route-vehicles:${focusedRouteId}` : "",
+    focusedRouteId && !/^(?:emma|local):/.test(focusedRouteId) ? `route-vehicles:${focusedRouteId}` : "",
     (signal) => routeVehicles(focusedRouteId!, signal),
     { active: active && !searchOpen, interval: 10_000, keepPrevious: false },
   );
@@ -643,9 +660,9 @@ export function MapScreen({
               onStop={chooseStop}
               onGeometry={setJourney}
             />
-          ) : tripId ? (
+          ) : tripId || selectedVehicle ? (
             <TripPanel
-              key={tripId}
+              key={tripId || selectedVehicle?.id}
               tripId={tripId}
               active={active && !searchOpen}
               departure={selectedDeparture}

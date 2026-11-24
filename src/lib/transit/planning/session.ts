@@ -7,7 +7,8 @@ import { budapestDay } from "./calendar";
 import { feasible, supported } from "./core";
 import { EmmaPlannerBackend } from "./emma-planner";
 import { HybridTripPlanner, timelyChoices, type TripPlan } from "./hybrid";
-import { planningNetwork, type LocalNetwork } from "./local-network";
+import type { LocalNetwork } from "./local-network";
+import { localNetwork } from "../local";
 import { indexedDbStorage, persistentWalking, WalkingLinkStore } from "./walking-store";
 
 /** A GPS origin moving less than this between prefetch and Find still counts as the same search. */
@@ -167,7 +168,7 @@ export function plannerSession() {
     shared = new PlannerSession({
       backend,
       planner: new HybridTripPlanner(backend),
-      loadNetwork: (signal) => planningNetwork(signal),
+      loadNetwork: (signal) => localNetwork(signal),
       nationalStops: () => knownStops(),
       clock: Date.now,
     });
