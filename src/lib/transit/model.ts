@@ -1,6 +1,7 @@
 import type { GeoPoint } from "~/lib/places";
 
-export type Source = "BKK API" | "EMMA";
+/** Which feed served a result (DataSource); the local operators' timetables and GPS are their own. */
+export type Source = "BKK API" | "EMMA" | "ViaBusz" | "KanyarGO" | "HOMM";
 export type Route = {
   id: string;
   name: string;
@@ -8,6 +9,8 @@ export type Route = {
   mode: string;
   color: string;
   textColor: string;
+  /** Local operator (viabusz, kanyargo, homm) for routes from the bundled local networks. */
+  provider?: string;
 };
 export type Stop = {
   bearing?: number;
@@ -35,6 +38,10 @@ export type Vehicle = {
   mode?: string;
   /** BKK's trip for a Volán bus that also has an EMMA record (Vehicle.bkkTripId). */
   bkkTripId?: string;
+  /** Local operator of a GPS-only vehicle (Vehicle.providerId: viabusz, kanyargo). */
+  provider?: string;
+  /** The next stop a GPS-only feed names (Vehicle.nextStopName). */
+  nextStopName?: string;
 };
 export type Departure = {
   source: Source;

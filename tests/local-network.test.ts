@@ -12,6 +12,8 @@ import {
   type LocalNetwork,
 } from "../src/lib/transit/planning/local-network";
 import { LocalTimetableRouter, transferKey } from "../src/lib/transit/planning/local-router";
+import { localDepartures, parseLocalVehicles } from "../src/lib/transit/local";
+import { resetTransport } from "../src/lib/transit/client";
 import { persistentWalking, storeKey, WalkingLinkStore, type StoredWalk, type WalkStorage } from "../src/lib/transit/planning/walking-store";
 import type { PlannerBackend, PlanPlace } from "../src/lib/transit/planning/backend";
 
@@ -156,4 +158,68 @@ test("WalkingLinkStore: 6-decimal keys, 60-day expiry, and only missing walks ar
   day = "2027-01-24";
   await persistentWalking(delegate, new WalkingLinkStore(storage, () => day)).walking([[a, b]], Date.now(), new AbortController().signal);
   expect(routed).toHaveLength(3);
+});
+
+const reviewed = {
+  viabusz: ["https://viabusz.biatorbagy.hu/documents/viabusz-menetrend-tanitas-261001.pdf?v=104", "https://viabusz.biatorbagy.hu/documents/viabusz-menetrend-szunet-260901.pdf?v=104"],
+  kanyargo: ["https://kanyargo.paty.hu/documents/menetrend-KanyarGO-2026-szept-1-tol.pdf?v=102", "https://kanyargo.paty.hu/documents/menetrend-KanyarGO-2026-aug-10-tanszuneti.pdf?v=102"],
+  homm: ["https://homm.hu/www/menetrend-budaors/Közlekedési rend tanítási napokon.pdf", "https://homm.hu/www/menetrend-budaors/Közlekedési rend tanítási szünetben.pdf", "https://homm.hu/www/menetrend-budaors/Átszállási időpontok.pdf"],
+} as Record<string, string[]>;
+function workerCheck(overrides: { sha?: string; links?: string[] } = {}) {
+  return mock(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith("/transit/local/")) return Response.json(asset(url.split("/").at(-1)!));
+    const provider = new URL(url).searchParams.get("provider")!;
+    const spec = LOCAL_PROVIDERS.find((p) => p.id === provider)!;
+    return Response.json({
+      status: "OK",
+      provider,
+      checkedAt: Date.now(),
+      links: overrides.links ?? reviewed[provider],
+      documents: { school: { sha256: overrides.sha ?? spec.schoolSha }, holiday: { sha256: spec.holidaySha } },
+    });
+  }) as unknown as typeof fetch;
+}
+
+test("the Worker's local-timetable-check verifies operators with Android's review rules", async () => {
+  resetTransport();
+  globalThis.fetch = workerCheck();
+  const now = Date.UTC(2026, 10, 24, 9);
+  const ok = await planningNetwork(new AbortController().signal, now);
+  expect([...ok.verifiedProviderIds].sort()).toEqual(["homm", "kanyargo", "viabusz"]);
+  expect(ok.providerServiceDates.viabusz).toBe("2026-11-24");
+  // Today's departures appear on a verified board.
+  const rows = localDepartures(ok, "1", now, 60);
+  expect(rows.length).toBeGreaterThan(0);
+  expect(rows[0]!.source).toBe("ViaBusz");
+  expect(rows[0]!.tripId.startsWith("local:")).toBe(true);
+  resetLocalNetworks();
+  resetTransport();
+  globalThis.fetch = workerCheck({ sha: "0".repeat(64) });
+  const changed = await planningNetwork(new AbortController().signal, now);
+  expect(changed.verifiedProviderIds.size).toBe(0);
+  expect(changed.providerWarnings.kanyargo).toContain("a hivatalos menetrend megváltozott");
+  expect(localDepartures(changed, "1", now, 60)).toEqual([]);
+  resetLocalNetworks();
+  resetTransport();
+  // An extra PDF in ViaBusz's timetable menu means a new, unreviewed timetable.
+  globalThis.fetch = workerCheck({ links: [...reviewed.viabusz!, "https://viabusz.biatorbagy.hu/documents/uj.pdf"] });
+  const menu = await planningNetwork(new AbortController().signal, now);
+  expect(menu.verifiedProviderIds.has("viabusz")).toBe(false);
+});
+
+test("ViaBusz/KanyarGO GPS rows: fresh, in-area positions only", () => {
+  const now = Date.UTC(2026, 10, 24, 13, 14, 0); // 14:14 Budapest
+  const body = [
+    "ROW-428;2026-11-24 14:13:20;47.47926300;18.83496500;3699807;;0'|0';Ritsmann Iskola",
+    "OLD-1;2026-11-24 13:00:00;47.47;18.83;1;;;",
+    "FAR-1;2026-11-24 14:13:00;47.60;18.83;1;;;",
+    "Error;x;y;z;w",
+  ].join("#");
+  const vehicles = parseLocalVehicles(body, "kanyargo", now);
+  expect(vehicles.map((v) => v.id)).toEqual(["local:kanyargo:ROW-428"]);
+  expect(vehicles[0]!.observedAt).toBe(Date.UTC(2026, 10, 24, 13, 13, 20));
+  expect(vehicles[0]!.source).toBe("KanyarGO");
+  expect(vehicles[0]!.provider).toBe("kanyargo");
+  expect(vehicles[0]!.nextStopName).toBe("Ritsmann Iskola");
 });

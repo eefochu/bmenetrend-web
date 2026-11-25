@@ -5,9 +5,11 @@ import type { Route, Stop, Vehicle } from "./model";
  * Operator and service labels from ViaBuszScreen.kt providerName/transportLabel and RouteSummary.kt
  * serviceTypeLabel, so panels describe a stop or line the way the Android app does.
  */
-export type ProviderId = "bkk" | "mav" | "hev" | "volan";
+export type ProviderId = "bkk" | "mav" | "hev" | "volan" | "viabusz" | "kanyargo" | "homm";
+const LOCAL = new Set(["viabusz", "kanyargo", "homm"]);
 
 export function routeProvider(route?: Route): ProviderId {
+  if (route?.provider && LOCAL.has(route.provider)) return route.provider as ProviderId;
   const mode = route?.mode;
   if (mode === "RAIL" || mode === "TRAMTRAIN") return "mav";
   if (mode === "SUBURBAN_RAILWAY") return "hev";
@@ -30,6 +32,9 @@ const PROVIDER_NAMES: Record<ProviderId, string> = {
   hev: "MÁV-HÉV",
   volan: "Volán",
   bkk: "BKK",
+  viabusz: "ViaBusz",
+  kanyargo: "KanyarGO",
+  homm: "HOMM",
 };
 
 export const providerName = (id: ProviderId) => PROVIDER_NAMES[id];
@@ -75,9 +80,8 @@ export function serviceTypeLabel(route?: Route): string {
     case "FERRY":
       return "Hajó";
   }
-  return routeProvider(route) === "volan"
-    ? "Regionális / helyközi busz"
-    : "Városi busz";
+  const provider = routeProvider(route);
+  return provider === "volan" ? "Regionális / helyközi busz" : LOCAL.has(provider) ? "Helyi busz" : "Városi busz";
 }
 
 /** The stop's own identifier for EMMA stops (ViaBuszScreen.kt stopLabel). */
@@ -117,5 +121,7 @@ export function vehicleLineColor(vehicle: Vehicle) {
   if (mode === "TROLLEYBUS") return "#E31B23";
   if (mode === "SUBWAY" || mode === "RAIL" || mode === "SUBURBAN_RAILWAY" || mode === "TRAMTRAIN")
     return "#0066AA";
+  const local = { viabusz: "#205C48", kanyargo: "#6750A4", homm: "#BF5700" }[vehicle.provider ?? ""];
+  if (local) return local;
   return routeProvider(vehicle.route) === "volan" ? "#F9B900" : "#199DCF";
 }

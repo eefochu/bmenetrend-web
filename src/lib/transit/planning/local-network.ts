@@ -1,4 +1,5 @@
 import type { GeoPoint } from "~/lib/places";
+import { request } from "../client";
 import { array, object, string, type Row } from "../model";
 import { budapestDay, hommCalendar, isConfirmedWorkingDay, isYearReviewed, kanyargoCalendar, viabuszCalendar, type Day } from "./calendar";
 
@@ -282,18 +283,16 @@ export function checkedDate(network: LocalNetwork, provider: LocalProvider, now:
   };
 }
 
-async function sha256(bytes: ArrayBuffer) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-/** The operator's active timetable documents, as each provider's validateNetwork reads its page. */
-export function activeDocumentsMatch(provider: LocalProvider, html: string, today: Day): boolean {
-  const document = new DOMParser().parseFromString(html, "text/html");
+/**
+ * The operator's active timetable documents, as each provider's validateNetwork reads its page. [links]
+ * are the page's PDF `href`s exactly as written, selected with the Android parsers' CSS selectors.
+ */
+export function activeDocumentsMatch(provider: LocalProvider, links: readonly string[], today: Day): boolean {
   const base = provider.url + provider.page;
+  const strip = (href: string) => href.split("?")[0]!.split("#")[0]!;
   const absolute = (href: string) => {
     try {
-      return new URL(href, base).href.split("?")[0]!.split("#")[0]!;
+      return strip(new URL(href, base).href);
     } catch {
       return "";
     }
@@ -301,22 +300,17 @@ export function activeDocumentsMatch(provider: LocalProvider, html: string, toda
   const school = provider.url + provider.school,
     holiday = provider.url + provider.holiday;
   if (provider.id === "viabusz") {
-    const links = new Set(
-      [...document.querySelectorAll(".dropdown-content a[href], a.mobileMenu[href]")]
-        .map((a) => absolute(a.getAttribute("href") ?? ""))
-        .filter((href) => href.toLowerCase().endsWith(".pdf")),
-    );
     // Check the timetable menu, not old links kept in historical news articles.
-    return links.size === 2 && links.has(school) && links.has(holiday);
+    const active = new Set(links.map(absolute).filter((href) => href.toLowerCase().endsWith(".pdf")));
+    return active.size === 2 && active.has(encodeURI(school)) && active.has(encodeURI(holiday));
   }
   if (provider.id === "kanyargo") {
-    const links = [...document.querySelectorAll(".tmtbl-cnt a[href]")]
-      .map((a) => (a.getAttribute("href") ?? "").split("?")[0]!)
-      .filter((href) => href.toLowerCase().endsWith(".pdf"));
+    const active = links.map((href) => href.split("?")[0]!).filter((href) => href.toLowerCase().endsWith(".pdf"));
+    // The static page keeps the school link during holidays; a switch to the reviewed break document is valid too.
     return (
-      links.length > 0 &&
-      links.every((href) => href === school || href === holiday) &&
-      (kanyargoCalendar(today) !== "school_term" || links.some((href) => href.endsWith(provider.school)))
+      active.length > 0 &&
+      active.every((href) => href === school || href === holiday) &&
+      (kanyargoCalendar(today) !== "school_term" || active.some((href) => href.endsWith(provider.school)))
     );
   }
   const known = new Set([
@@ -326,38 +320,34 @@ export function activeDocumentsMatch(provider: LocalProvider, html: string, toda
       (name) => `${provider.url}www/menetrend-budaors/${name}`,
     ),
   ]);
-  const links = new Set(
-    [...document.querySelectorAll("a[href]")]
-      .map((a) => {
+  const active = new Set(
+    links
+      .map((href) => {
         try {
-          return decodeURIComponent(absolute(a.getAttribute("href") ?? "").replace(/\+/g, "%2B"));
+          return decodeURIComponent(absolute(href).replace(/\+/g, "%2B"));
         } catch {
           return "";
         }
       })
       .filter((href) => href.startsWith(`${provider.url}www/menetrend-budaors/`) && href.toLowerCase().endsWith(".pdf")),
   );
-  return links.has(school) && links.has(holiday) && [...links].every((href) => known.has(href));
+  return active.has(school) && active.has(holiday) && [...active].every((href) => known.has(href));
 }
 
 export class SourceChanged extends Error {}
 
 /**
  * The provider's validateNetwork: today's operator page lists exactly the reviewed documents and both
- * PDFs still have the reviewed fingerprints. Browsers can only do this where the operator allows CORS;
- * a network/CORS failure is reported like Android's IOException branch (fail closed).
+ * PDFs still have the reviewed fingerprints. The operators send no CORS headers, so the BKK Worker reads
+ * them (`local-timetable-check`); the review rules stay here, as in Android. Unreachable means fail closed.
  */
 export async function verifyProvider(provider: LocalProvider, base: LocalNetwork, now: number, signal: AbortSignal): Promise<LocalNetwork> {
-  const get = async (path: string) => {
-    const response = await fetch(provider.url + path, { mode: "cors", credentials: "omit", cache: "no-store", signal });
-    if (!response.ok) throw new TypeError(`HTTP ${response.status}`);
-    return response;
-  };
-  const [page, school, holiday] = await Promise.all([
-    get(provider.page).then((response) => response.text()),
-    get(provider.school).then((response) => response.arrayBuffer()).then(sha256),
-    get(provider.holiday).then((response) => response.arrayBuffer()).then(sha256),
-  ]);
+  const root = await request("local-timetable-check", { provider: provider.id }, signal);
+  const documents = object(root.documents);
+  const school = string(object(documents.school).sha256),
+    holiday = string(object(documents.holiday).sha256);
+  const links = array(root.links).map(string);
+  if (root.provider !== provider.id || !school || !holiday) throw new TypeError("Incomplete timetable check");
   const today = budapestDay(now);
   const numbers = new Set(base.routes.map((route) => route.number));
   if (!base.routes.every((route) => route.providerId === provider.id) || numbers.size !== provider.numbers.length || !provider.numbers.every((n) => numbers.has(n)))
@@ -365,7 +355,7 @@ export async function verifyProvider(provider: LocalProvider, base: LocalNetwork
   if (provider.id === "viabusz" && !base.trips.every((trip) => trip.calendar === "school_term" || trip.calendar === "school_break"))
     throw new SourceChanged("ViaBusz requires reviewed school and holiday tables");
   if (school !== provider.schoolSha || holiday !== provider.holidaySha) throw new SourceChanged("Timetable document changed");
-  if (!activeDocumentsMatch(provider, page, today)) throw new SourceChanged("Active timetable changed");
+  if (!activeDocumentsMatch(provider, links, today)) throw new SourceChanged("Active timetable changed");
   const date = activeToday(provider.id, today) ? today : null;
   return { ...base, fetchedAt: now, serviceDate: date, providerServiceDates: { [provider.id]: date }, warning: null, verifiedProviderIds: new Set([provider.id]) };
 }

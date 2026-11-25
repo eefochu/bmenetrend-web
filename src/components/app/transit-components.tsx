@@ -601,6 +601,8 @@ export function TripPanel({
         mode: vehicle?.mode ?? "BUS",
         color: journey?.color ?? "#199DCF",
         textColor: "#ffffff",
+        // A local operator's GPS bus has no line, but keeps its operator (VehiclePanel: serviceTypeLabel · provider).
+        provider: vehicle?.provider,
       },
     [departure, vehicle, journey, tripId],
   );
@@ -645,10 +647,11 @@ export function TripPanel({
       {!resource.data && resource.loading && (
         <p className="panel-message t-body-medium">A menet megállóinak betöltése…</p>
       )}
-      {resource.data && stops.length === 0 && (
-        <p className="panel-message t-body-medium on-variant">
-          A forrás nem közölt megállólistát ehhez a járműhöz.
-        </p>
+      {(resource.data !== undefined || (vehicle && !tripId)) && stops.length === 0 && (
+        <div className="panel-message">
+          {vehicle?.nextStopName && <p className="t-title-small">Következő megálló: {vehicle.nextStopName}</p>}
+          <p className="t-body-medium on-variant">A forrás nem közölt megállólistát ehhez a járműhöz.</p>
+        </div>
       )}
       {stops.length > 0 && (
         <p className="stops-count t-label-medium on-variant">{stopsCount(stops.length)}</p>

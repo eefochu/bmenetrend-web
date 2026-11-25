@@ -118,6 +118,8 @@ export default function TransitMap({
   const [styleRevision, setStyleRevision] = useState(0);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const styleReady = useRef(false);
+  /** True once the current style and its first tiles have loaded (cleared by a style swap). */
+  const mapSettled = useRef(false);
   const lastFit = useRef("");
   const initialStyle = useRef(styleUrl);
   initialStyle.current = styleUrl;
@@ -157,14 +159,24 @@ export default function TransitMap({
     }
     mapRef.current = map;
     attachStyleImages(map);
+    // NativeTransitMap's onDidFailLoadingMap: only a failure while the style and its first tiles
+    // load is a map outage. Once the map has settled, a failed tile or image request (a network blip,
+    // waking from sleep) is retried by MapLibre on the next render and must not cover the map.
     // Idle also fires after failed requests; retain the retry action on failure.
     let loadFailed = false;
-    map.on("error", () => {
+    mapSettled.current = false;
+    map.on("error", (event) => {
+      if (mapSettled.current) {
+        console.warn("Map resource failed", event.error);
+        return;
+      }
       loadFailed = true;
       setStatus("error");
     });
     map.on("idle", () => {
-      if (!loadFailed) setStatus("ready");
+      if (loadFailed) return;
+      mapSettled.current = true;
+      setStatus("ready");
     });
     map.on("style.load", () => {
       loadFailed = false;
@@ -313,6 +325,7 @@ export default function TransitMap({
     appliedStyle.current = styleUrl;
     setStatus("loading");
     styleReady.current = false;
+    mapSettled.current = false;
     map.setStyle(styleUrl, { diff: false });
   }, [styleUrl, attempt]);
 

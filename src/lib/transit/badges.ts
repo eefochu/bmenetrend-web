@@ -38,6 +38,10 @@ export function transport(route?: Route) {
     return { asset: "vehicle_train", color: "#0066AA" };
   if (route?.id.startsWith("volan_") || route?.id.startsWith("emma:hkir:"))
     return { asset: "vehicle_volan_bus", color: "#F9B900" };
+  // VehicleMarkerStyle / StopMarkerLayout.color: the local operators' own colours and artwork.
+  if (route?.provider === "viabusz") return { asset: "vehicle_viabusz_bus", color: "#205C48" };
+  if (route?.provider === "kanyargo") return { asset: "vehicle_kanyargo_bus", color: "#6750A4" };
+  if (route?.provider === "homm") return { asset: "vehicle_homm_bus", color: "#BF5700" };
   return { asset: "vehicle_bkk_bus", color: "#199DCF" };
 }
 export function serviceStyle(route?: Route) {

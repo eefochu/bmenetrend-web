@@ -1,5 +1,6 @@
 import { emmaBoard, emmaTrip, isVolanId, railNumber } from "./emma";
 import { budapestParts, itinerary, routerLegKey } from "./planning/core";
+import { isLocalId, localBoard, localTrip } from "./local";
 import type { GeoPoint } from "~/lib/places";
 import {
   appStopId,
@@ -34,6 +35,9 @@ const TTL: Record<string, number> = {
   "route-details": 30_000,
   "plan-trip": 5_000,
   "service-disruptions": 60_000,
+  // The Worker's relay of the local operators (tools/bkk-worker/src/local.js).
+  "local-timetable-check": 600_000,
+  "local-live": 10_000,
   "arrivals-and-departures-for-stop": 10_000,
   "arrivals-and-departures-for-stops": 10_000,
 };
@@ -78,6 +82,7 @@ export function planHeadroom() {
 
 /** Map/nearby polling: kept below the full budget so taps on stops, trips and lines always have headroom. */
 const BACKGROUND = new Set([
+  "local-live",
   "service-disruptions",
   "stops-for-location",
   "vehicles-for-location",
@@ -179,10 +184,10 @@ export async function request(
             `A közlekedési szolgáltató nem érhető el (${response.status}).`,
           );
         const json = object(await response.json());
-        // service-disruptions has its own envelope: two feeds, each with its own timestamp.
+        // service-disruptions and the local relays have their own envelopes and timestamps.
         if (
           json.status !== "OK" ||
-          (endpoint !== "service-disruptions" &&
+          (!["service-disruptions", "local-timetable-check", "local-live"].includes(endpoint) &&
             (!json.data || typeof json.data !== "object" || Array.isArray(json.data) || !number(json.currentTime)))
         )
           throw new TransitError("A szolgáltató hibás választ adott.");
@@ -411,6 +416,7 @@ export async function board(
   minutes: number,
   signal: AbortSignal,
 ): Promise<Snapshot<Departure[]>> {
+  if (isLocalId(stop.id)) return localBoard(stop, minutes, signal);
   if (stop.source === "EMMA" && stop.id.startsWith("emma:1:"))
     return emmaBoard(stop, minutes, signal);
   // TransitViewModel.fetchBoards: FUTÁR serves two hours and knows rural Volán stops (Császár, Kecskéd…)
@@ -477,7 +483,16 @@ export async function boards(
       return null;
     }
   };
+  const local = async (stop: Stop) => {
+    try {
+      return (await localBoard(stop, minutes, signal)).value;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return null;
+    }
+  };
   const direct = (stop: Stop) =>
+    isLocalId(stop.id) ||
     (stop.source === "EMMA" && stop.id.startsWith("emma:1:")) ||
     (emmaServes(stop) && minutes > 120);
   const worker = stops.filter((stop) => !direct(stop));
@@ -515,7 +530,7 @@ export async function boards(
   await Promise.all(
     stops
       .filter(direct)
-      .map(async (stop) => results.set(stop.id, await fallback(stop))),
+      .map(async (stop) => results.set(stop.id, isLocalId(stop.id) ? await local(stop) : await fallback(stop))),
   );
   return stops.map((stop) => results.get(stop.id) ?? null);
 }
@@ -588,6 +603,7 @@ export async function tripDetails(
   tripId: string,
   signal: AbortSignal,
 ): Promise<Snapshot<Journey>> {
+  if (isLocalId(tripId)) return localTrip(tripId, signal);
   if (tripId.startsWith("emma:1:") || isVolanId(tripId)) return emmaTrip(tripId, signal);
   const root = await request(
     "trip-details",
