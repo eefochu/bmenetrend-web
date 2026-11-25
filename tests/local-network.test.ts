@@ -220,4 +220,6 @@ test("ViaBusz/KanyarGO GPS rows: fresh, in-area positions only", () => {
   expect(vehicles.map((v) => v.id)).toEqual(["local:kanyargo:ROW-428"]);
   expect(vehicles[0]!.observedAt).toBe(Date.UTC(2026, 10, 24, 13, 13, 20));
   expect(vehicles[0]!.source).toBe("KanyarGO");
+  expect(vehicles[0]!.provider).toBe("kanyargo");
+  expect(vehicles[0]!.nextStopName).toBe("Ritsmann Iskola");
 });

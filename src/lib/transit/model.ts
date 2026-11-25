@@ -40,6 +40,8 @@ export type Vehicle = {
   bkkTripId?: string;
   /** Local operator of a GPS-only vehicle (Vehicle.providerId: viabusz, kanyargo). */
   provider?: string;
+  /** The next stop a GPS-only feed names (Vehicle.nextStopName). */
+  nextStopName?: string;
 };
 export type Departure = {
   source: Source;

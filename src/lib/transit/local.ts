@@ -227,6 +227,7 @@ export function parseLocalVehicles(body: string, provider: "viabusz" | "kanyargo
       source: SOURCE[provider]!,
       mode: "BUS",
       provider,
+      nextStopName: fields[7]?.trim() ? fields[7].trim() : undefined,
     });
   }
   return [...seen.values()];
